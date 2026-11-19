@@ -1,0 +1,36 @@
+services:
+  # Rust + pgrx toolchain. Source is bind-mounted; cargo caches live in volumes.
+  #   docker compose run --rm builder cargo pgrx test pg17
+  #   docker compose run --rm builder cargo clippy -- -D warnings
+  builder:
+    build:
+      context: .
+      target: builder
+    working_dir: /src
+    volumes:
+      - .:/src
+      - cargo-registry:/home/dev/.cargo/registry
+      - cargo-target:/src/target
+      - pgrx-data:/home/dev/.pgrx
+    command: ["bash"]
+    profiles: ["tools"]
+
+  # Postgres with the compiled extension installed and preloaded.
+  #   docker compose up --build db
+  #   psql postgres://postgres:postgres@localhost:5432/postgres
+  db:
+    build:
+      context: .
+      target: postgres
+    environment:
+      POSTGRES_PASSWORD: postgres   # local development only
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  cargo-registry:
+  cargo-target:
+  pgrx-data:
+  pgdata:
