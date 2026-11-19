@@ -3,28 +3,23 @@
 //! The record lives in shared memory and is copied verbatim, so it is plain
 //! `#[repr(C)]` data with no pointers. Query text follows it inline in the slot.
 
-/// Command type of a recorded statement.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum CmdKind {
-    Unknown = 0,
-    Select = 1,
-    Insert = 2,
-    Update = 3,
-    Delete = 4,
-    Merge = 5,
-    Utility = 6,
-}
+/// Command type codes stored in `TraceRecord::cmd_type`.
+pub mod cmd {
+    pub const SELECT: u8 = 1;
+    pub const INSERT: u8 = 2;
+    pub const UPDATE: u8 = 3;
+    pub const DELETE: u8 = 4;
+    pub const MERGE: u8 = 5;
+    pub const UTILITY: u8 = 6;
 
-impl CmdKind {
-    pub fn as_str(v: u8) -> &'static str {
+    pub fn name(v: u8) -> &'static str {
         match v {
-            1 => "select",
-            2 => "insert",
-            3 => "update",
-            4 => "delete",
-            5 => "merge",
-            6 => "utility",
+            SELECT => "select",
+            INSERT => "insert",
+            UPDATE => "update",
+            DELETE => "delete",
+            MERGE => "merge",
+            UTILITY => "utility",
             _ => "unknown",
         }
     }

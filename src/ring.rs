@@ -140,17 +140,20 @@ impl Drop for Guard {
     }
 }
 
-/// Longest prefix of `text` that is at most `max` bytes and ends on a UTF-8
-/// character boundary.
-pub fn truncate_utf8(text: &str, max: usize) -> &str {
+/// Longest prefix of `text` that is at most `max` bytes and ends on a
+/// character boundary of the server encoding (UTF-8 or otherwise).
+pub fn clip_text(text: &[u8], max: usize) -> &[u8] {
     if text.len() <= max {
         return text;
     }
-    let mut end = max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+    let n = unsafe {
+        pg_sys::pg_mbcliplen(
+            text.as_ptr() as *const std::ffi::c_char,
+            text.len() as i32,
+            max as i32,
+        )
+    };
+    &text[..n as usize]
 }
 
 unsafe fn slot_ptr(hdr: *mut RingHeader, seq: u64) -> *mut u8 {
@@ -161,13 +164,14 @@ unsafe fn slot_ptr(hdr: *mut RingHeader, seq: u64) -> *mut u8 {
 }
 
 /// Append a record. `rec.seq` and `rec.query_len` are filled in here.
-pub fn push(rec: &TraceRecord, text: &str) {
+pub fn push(rec: &TraceRecord, text: &[u8]) {
     unsafe {
         let hdr = RING;
         if hdr.is_null() {
             return;
         }
-        let text = truncate_utf8(text, (*hdr).text_cap as usize);
+        // Clip before taking the lock (pg_mbcliplen may be slowish).
+        let text = clip_text(text, (*hdr).text_cap as usize);
         let mut rec = *rec;
         rec.query_len = text.len() as u32;
 
@@ -237,20 +241,5 @@ pub fn stats() -> Stats {
             overwritten: head.saturating_sub(cap) as i64,
             max_query_len: (*hdr).text_cap as i32,
         }
-    }
-}
-
-#[cfg(test)]
-mod unit {
-    use super::truncate_utf8;
-
-    #[test]
-    fn truncates_on_char_boundary() {
-        assert_eq!(truncate_utf8("hello", 10), "hello");
-        assert_eq!(truncate_utf8("hello", 3), "hel");
-        // 'é' is two bytes; cutting in the middle backs up to the boundary.
-        assert_eq!(truncate_utf8("aé", 2), "a");
-        assert_eq!(truncate_utf8("aé", 3), "aé");
-        assert_eq!(truncate_utf8("é", 0), "");
     }
 }

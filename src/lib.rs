@@ -1,9 +1,9 @@
 use pgrx::prelude::*;
 
+mod backend;
 mod gucs;
-#[allow(dead_code)] // TODO(step 4+): remove once used
+mod hooks;
 mod record;
-#[allow(dead_code)]
 mod ring;
 mod sql;
 
@@ -19,6 +19,7 @@ pub extern "C-unwind" fn _PG_init() {
     }
     gucs::register();
     ring::install();
+    hooks::install();
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -47,10 +48,34 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_reset_hides_rows() {
+    fn test_select_is_recorded() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
         Spi::run("SELECT pg_profiler_reset()").unwrap();
-        let retained = Spi::get_one::<i64>("SELECT retained FROM pg_profiler_info()").unwrap();
-        assert_eq!(retained, Some(0));
+        Spi::run("SELECT 42 AS pg_profiler_marker_4").unwrap();
+        let rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler() WHERE query LIKE '%pg_profiler_marker_4%' AND query NOT LIKE '%pg_profiler()%'",
+        )
+        .unwrap();
+        assert_eq!(rows, Some(1));
+        let (rows, cmd, err) = Spi::get_three::<i64, String, bool>(
+            "SELECT rows, cmd_type, is_error FROM pg_profiler() WHERE query LIKE 'SELECT 42 AS pg_profiler_marker_4%'",
+        )
+        .unwrap();
+        assert_eq!(rows, Some(1));
+        assert_eq!(cmd.as_deref(), Some("select"));
+        assert_eq!(err, Some(false));
+    }
+
+    #[pg_test]
+    fn test_reset_hides_rows() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("SELECT 1 AS pg_profiler_marker_reset").unwrap();
+        Spi::run("SELECT pg_profiler_reset()").unwrap();
+        let n = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler() WHERE query LIKE 'SELECT 1 AS pg_profiler_marker_reset%'",
+        )
+        .unwrap();
+        assert_eq!(n, Some(0));
     }
 }
 

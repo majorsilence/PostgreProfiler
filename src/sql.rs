@@ -1,5 +1,6 @@
 //! SQL-facing functions and views.
 
+use crate::record::cmd;
 use crate::ring;
 use pgrx::prelude::*;
 
@@ -28,3 +29,85 @@ extension_sql!(
     name = "revoke_reset",
     requires = [pg_profiler_reset]
 );
+
+/// The newest `lim` recorded executions, newest first.
+#[pg_extern(name = "pg_profiler")]
+#[allow(clippy::type_complexity)]
+fn pg_profiler_rows(lim: default!(i32, 1000)) -> TableIterator<
+    'static,
+    (
+        name!(seq, i64),
+        name!(start_time, Option<TimestampWithTimeZone>),
+        name!(userid, pg_sys::Oid),
+        name!(dbid, pg_sys::Oid),
+        name!(pid, i32),
+        name!(queryid, i64),
+        name!(cmd_type, String),
+        name!(toplevel, bool),
+        name!(nesting, i32),
+        name!(exec_time_ms, f64),
+        name!(plan_time_ms, f64),
+        name!(cpu_user_ms, f64),
+        name!(cpu_sys_ms, f64),
+        name!(rows, i64),
+        name!(shared_blks_hit, i64),
+        name!(shared_blks_read, i64),
+        name!(shared_blks_dirtied, i64),
+        name!(shared_blks_written, i64),
+        name!(local_blks_hit, i64),
+        name!(local_blks_read, i64),
+        name!(temp_blks_read, i64),
+        name!(temp_blks_written, i64),
+        name!(wal_records, i64),
+        name!(wal_fpi, i64),
+        name!(wal_bytes, i64),
+        name!(is_error, bool),
+        name!(sqlstate, Option<String>),
+        name!(query, Option<String>),
+    ),
+> {
+    ring::ensure_ready();
+    let rows = ring::snapshot(lim.max(0) as usize);
+    TableIterator::new(rows.into_iter().map(|(r, text)| {
+        let sqlstate = if r.is_error {
+            Some(String::from_utf8_lossy(&r.sqlstate).into_owned())
+        } else {
+            None
+        };
+        let query = if r.query_len > 0 {
+            Some(String::from_utf8_lossy(&text).into_owned())
+        } else {
+            None
+        };
+        (
+            r.seq as i64,
+            TimestampWithTimeZone::try_from(r.start_ts).ok(),
+            pg_sys::Oid::from(r.userid),
+            pg_sys::Oid::from(r.dbid),
+            r.pid,
+            r.queryid,
+            cmd::name(r.cmd_type).to_string(),
+            r.toplevel,
+            r.nesting,
+            r.exec_time_us / 1000.0,
+            r.plan_time_us / 1000.0,
+            r.cpu_user_us as f64 / 1000.0,
+            r.cpu_sys_us as f64 / 1000.0,
+            r.rows as i64,
+            r.shared_blks_hit,
+            r.shared_blks_read,
+            r.shared_blks_dirtied,
+            r.shared_blks_written,
+            r.local_blks_hit,
+            r.local_blks_read,
+            r.temp_blks_read,
+            r.temp_blks_written,
+            r.wal_records,
+            r.wal_fpi,
+            r.wal_bytes as i64,
+            r.is_error,
+            sqlstate,
+            query,
+        )
+    }))
+}
