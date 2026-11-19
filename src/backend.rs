@@ -1,9 +1,6 @@
 //! Per-backend state. Backends are single-threaded, so plain `thread_local!`
 //! cells are enough; nothing here is shared with other backends.
 
-// TODO(step 5): remove once the nesting/error hooks use everything here.
-#![allow(dead_code)]
-
 use crate::gucs::{self, TrackLevel};
 use crate::record::TraceRecord;
 use pgrx::pg_sys;
@@ -45,6 +42,11 @@ pub fn reset_all() {
     STARTS.with(|s| s.borrow_mut().clear());
 }
 
+/// A subtransaction aborted: forget statements that started inside it.
+pub fn abort_subxact(my_subid: pg_sys::SubTransactionId) {
+    STARTS.with(|s| s.borrow_mut().retain(|i| i.subid < my_subid));
+}
+
 /// Decide whether the top-level statement that is starting is sampled.
 /// Nested statements keep the decision, so a sampled statement's children are
 /// kept together.
@@ -83,10 +85,6 @@ pub fn take_start(qd: *mut pg_sys::QueryDesc) -> Option<StartInfo> {
         let pos = v.iter().rposition(|i| i.qd == qd)?;
         Some(v.remove(pos))
     })
-}
-
-pub fn peek_start(qd: *mut pg_sys::QueryDesc) -> Option<StartInfo> {
-    STARTS.with(|s| s.borrow().iter().rev().find(|i| i.qd == qd).copied())
 }
 
 /// A record pre-filled with the identity fields common to every statement.

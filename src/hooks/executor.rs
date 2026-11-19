@@ -8,15 +8,23 @@ use crate::record::{cmd, TraceRecord};
 use crate::ring;
 use pgrx::prelude::*;
 use pgrx::{pg_sys, PgMemoryContexts};
+use pgrx::pg_sys::panic::CaughtError;
 use std::ffi::c_int;
+use std::panic::AssertUnwindSafe;
 
 static mut PREV_START: pg_sys::ExecutorStart_hook_type = None;
+static mut PREV_RUN: pg_sys::ExecutorRun_hook_type = None;
+static mut PREV_FINISH: pg_sys::ExecutorFinish_hook_type = None;
 static mut PREV_END: pg_sys::ExecutorEnd_hook_type = None;
 
 pub fn install() {
     unsafe {
         PREV_START = pg_sys::ExecutorStart_hook;
         pg_sys::ExecutorStart_hook = Some(executor_start);
+        PREV_RUN = pg_sys::ExecutorRun_hook;
+        pg_sys::ExecutorRun_hook = Some(executor_run);
+        PREV_FINISH = pg_sys::ExecutorFinish_hook;
+        pg_sys::ExecutorFinish_hook = Some(executor_finish);
         PREV_END = pg_sys::ExecutorEnd_hook;
         pg_sys::ExecutorEnd_hook = Some(executor_end);
     }
@@ -75,6 +83,100 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
             nesting: level,
             subid: pg_sys::GetCurrentSubTransactionId(),
         });
+    }
+}
+
+// ExecutorRun gained `execute_once` in PG 17 and lost it again in PG 18.
+#[cfg(feature = "pg17")]
+#[pg_guard]
+unsafe extern "C-unwind" fn executor_run(
+    qd: *mut pg_sys::QueryDesc,
+    direction: pg_sys::ScanDirection::Type,
+    count: u64,
+    execute_once: bool,
+) {
+    unsafe {
+        guarded(qd, || match PREV_RUN {
+            Some(prev) => prev(qd, direction, count, execute_once),
+            None => pg_sys::standard_ExecutorRun(qd, direction, count, execute_once),
+        })
+    }
+}
+
+#[cfg(feature = "pg18")]
+#[pg_guard]
+unsafe extern "C-unwind" fn executor_run(
+    qd: *mut pg_sys::QueryDesc,
+    direction: pg_sys::ScanDirection::Type,
+    count: u64,
+) {
+    unsafe {
+        guarded(qd, || match PREV_RUN {
+            Some(prev) => prev(qd, direction, count),
+            None => pg_sys::standard_ExecutorRun(qd, direction, count),
+        })
+    }
+}
+
+#[pg_guard]
+unsafe extern "C-unwind" fn executor_finish(qd: *mut pg_sys::QueryDesc) {
+    unsafe {
+        guarded(qd, || match PREV_FINISH {
+            Some(prev) => prev(qd),
+            None => pg_sys::standard_ExecutorFinish(qd),
+        })
+    }
+}
+
+/// Run `f` (the chained Run/Finish) one nesting level deeper. The level is
+/// restored in `finally`, so an `ERROR` cannot leak the counter even though
+/// ExecutorEnd is skipped on abort. If `f` fails and the statement is tracked,
+/// an error record is emitted before the error is re-thrown.
+unsafe fn guarded(qd: *mut pg_sys::QueryDesc, f: impl FnOnce()) {
+    backend::enter();
+    let qd_addr = qd as usize;
+    PgTryBuilder::new(AssertUnwindSafe(f))
+        .catch_others(move |e| {
+            record_error(qd_addr as *mut pg_sys::QueryDesc, &e);
+            e.rethrow()
+        })
+        .finally(backend::leave)
+        .execute();
+}
+
+/// Pack of the 5-character SQLSTATE from Postgres' 6-bit-per-char encoding.
+pub fn sqlstate_bytes(code: i32) -> [u8; 5] {
+    let mut out = [b'0'; 5];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = (((code >> (6 * i)) & 0x3F) as u8) + b'0';
+    }
+    out
+}
+
+pub fn error_sqlstate(e: &CaughtError) -> [u8; 5] {
+    let report = match e {
+        CaughtError::PostgresError(r) | CaughtError::ErrorReport(r) => r,
+        CaughtError::RustPanic { ereport, .. } => ereport,
+    };
+    sqlstate_bytes(report.sql_error_code() as i32)
+}
+
+/// Emit the error record for a tracked statement that failed.
+fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
+    let Some(info) = backend::take_start(qd) else {
+        return;
+    };
+    unsafe {
+        let plan = &*(*qd).plannedstmt;
+        let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting);
+        rec.queryid = plan.queryId as _;
+        rec.cmd_type = cmd_kind((*qd).operation);
+        rec.exec_time_us = (pg_sys::GetCurrentTimestamp() - info.start_ts) as f64;
+        rec.plan_time_us = info.plan_us;
+        rec.is_error = true;
+        rec.sqlstate = error_sqlstate(e);
+        let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
+        ring::push(&rec, text);
     }
 }
 

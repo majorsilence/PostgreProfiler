@@ -1,0 +1,25 @@
+SET pg_profiler.track = 'top';
+SELECT 1 AS regress_marker_reset;
+ regress_marker_reset 
+----------------------
+                    1
+(1 row)
+
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+SELECT count(*) FROM pg_profiler() WHERE query LIKE '%regress_marker_reset%';
+ count 
+-------
+     0
+(1 row)
+
+SELECT capacity, max_query_len FROM pg_profiler_info();
+ capacity | max_query_len 
+----------+---------------
+    10000 |          2048
+(1 row)
+

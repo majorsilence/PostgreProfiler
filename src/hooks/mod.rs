@@ -1,7 +1,7 @@
 //! Hook installation. Each hook saves the previous one in a `static mut` and
 //! always chains to it (or to the `standard_*` function).
 
-use pgrx::pg_sys;
+use pgrx::prelude::*;
 
 mod executor;
 
@@ -33,4 +33,35 @@ pub fn install() {
         pg_sys::EnableQueryId();
     }
     executor::install();
+    unsafe {
+        pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
+        pg_sys::RegisterSubXactCallback(Some(subxact_callback), std::ptr::null_mut());
+    }
+}
+
+/// After an abort, ExecutorEnd never runs for the statements that were in
+/// flight; drop the bookkeeping so it cannot leak or be matched to a recycled
+/// `QueryDesc` address.
+#[pg_guard]
+unsafe extern "C-unwind" fn xact_callback(
+    event: pg_sys::XactEvent::Type,
+    _arg: *mut std::ffi::c_void,
+) {
+    if event == pg_sys::XactEvent::XACT_EVENT_ABORT
+        || event == pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT
+    {
+        crate::backend::reset_all();
+    }
+}
+
+#[pg_guard]
+unsafe extern "C-unwind" fn subxact_callback(
+    event: pg_sys::SubXactEvent::Type,
+    my_subid: pg_sys::SubTransactionId,
+    _parent_subid: pg_sys::SubTransactionId,
+    _arg: *mut std::ffi::c_void,
+) {
+    if event == pg_sys::SubXactEvent::SUBXACT_EVENT_ABORT_SUB {
+        crate::backend::abort_subxact(my_subid);
+    }
 }

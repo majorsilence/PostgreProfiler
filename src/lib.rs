@@ -77,6 +77,52 @@ mod tests {
         .unwrap();
         assert_eq!(n, Some(0));
     }
+
+    fn count_marker(marker: &str) -> i64 {
+        Spi::get_one::<i64>(&format!(
+            "SELECT count(*) FROM pg_profiler() WHERE query LIKE '%{marker}%'              AND query NOT LIKE '%pg_profiler()%'"
+        ))
+        .unwrap()
+        .unwrap()
+    }
+
+    #[pg_test]
+    fn test_nested_recorded_only_with_track_all() {
+        Spi::run(
+            "CREATE FUNCTION pg_profiler_nested_fn() RETURNS int LANGUAGE plpgsql AS              $$ BEGIN RETURN (SELECT 7 AS pg_profiler_marker_nested); END $$",
+        )
+        .unwrap();
+        // The test body itself runs nested inside the top-level test call, so
+        // with track = top nothing it executes is recorded.
+        Spi::run("SET pg_profiler.track = 'top'").unwrap();
+        Spi::run("SELECT pg_profiler_nested_fn()").unwrap();
+        assert_eq!(count_marker("pg_profiler_marker_nested"), 0);
+
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("SELECT pg_profiler_nested_fn()").unwrap();
+        // the inner SELECT inside the function body
+        assert_eq!(count_marker("pg_profiler_marker_nested"), 1);
+        let nesting = Spi::get_one::<i32>(
+            "SELECT nesting FROM pg_profiler() WHERE query LIKE '%pg_profiler_marker_nested%'              AND query NOT LIKE '%pg_profiler()%' AND query NOT LIKE 'CREATE%'",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(nesting >= 1);
+    }
+
+    #[pg_test]
+    fn test_runtime_error_is_recorded() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run(
+            "DO $$ BEGIN PERFORM 1 / g AS pg_profiler_marker_err FROM generate_series(0, 0) g;              EXCEPTION WHEN division_by_zero THEN NULL; END $$",
+        )
+        .unwrap();
+        let state = Spi::get_one::<String>(
+            "SELECT sqlstate FROM pg_profiler() WHERE is_error              AND query LIKE '%pg_profiler_marker_err%' AND query NOT LIKE 'DO%'              AND query NOT LIKE '%pg_profiler()%'",
+        )
+        .unwrap();
+        assert_eq!(state.as_deref(), Some("22012"));
+    }
 }
 
 /// This module is required by `cargo pgrx test` invocations.
