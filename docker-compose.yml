@@ -1,11 +1,11 @@
 services:
   # Rust + pgrx toolchain. Source is bind-mounted; cargo caches live in volumes.
-  #   docker compose run --rm builder cargo pgrx test pg17
+  #   docker compose run --rm builder cargo pgrx test pg18
   #   docker compose run --rm builder cargo clippy -- -D warnings
   builder:
     build:
       context: .
-      target: builder
+      target: toolchain
     working_dir: /src
     volumes:
       - .:/src

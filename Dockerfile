@@ -1,18 +1,18 @@
 # syntax=docker/dockerfile:1
 #
-# Stage "builder": Rust toolchain + cargo-pgrx + Postgres dev headers.
-#   Used for compiling/testing (see docker-compose.yml, service "builder").
-# Stage "postgres": stock Postgres image with the compiled extension installed.
+# Stages:
+#   toolchain - Rust + cargo-pgrx + Postgres 17 and 18 server/dev packages.
+#               No source; used by the compose "builder" service with the repo
+#               bind-mounted for compile/lint/test.
+#   build     - compiles and packages the extension for PG_MAJOR.
+#   postgres  - stock Postgres image with the packaged extension installed.
 #
-# Keep PGRX_VERSION in sync with the `pgrx` version in Cargo.toml, and
-# EXT_NAME in sync with the crate / control-file name.
+# Keep PGRX_VERSION in sync with the `pgrx` version in Cargo.toml.
 
-ARG PG_MAJOR=17
+ARG PG_MAJOR=18
 
-FROM rust:1-bookworm AS builder
-ARG PG_MAJOR
-ARG PGRX_VERSION=0.17.0
-ARG EXT_NAME=pg_trace
+FROM rust:1-bookworm AS toolchain
+ARG PGRX_VERSION=0.20.0
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -26,31 +26,39 @@ RUN apt-get update \
       > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      postgresql-${PG_MAJOR} postgresql-server-dev-${PG_MAJOR} \
+      postgresql-17 postgresql-server-dev-17 \
+      postgresql-18 postgresql-server-dev-18 \
  && rm -rf /var/lib/apt/lists/*
 
-# Postgres refuses to run as root, and `cargo pgrx test/run` starts it,
-# so build and test as an unprivileged user.
+# Postgres refuses to run as root, and `cargo pgrx test/run` starts it, so
+# build and test as an unprivileged user that may write the PG install dirs
+# (cargo pgrx test installs the extension into them).
 RUN useradd --create-home --uid 1000 dev \
- && install -d -o dev -g dev /src
+ && install -d -o dev -g dev /src /src/target \
+ && for v in 17 18; do \
+      chown -R dev:dev /usr/lib/postgresql/$v/lib /usr/share/postgresql/$v/extension; \
+    done
 USER dev
-ENV CARGO_HOME=/home/dev/.cargo \
+ENV USER=dev \
+    CARGO_HOME=/home/dev/.cargo \
     PATH=/home/dev/.cargo/bin:/usr/local/cargo/bin:$PATH
 WORKDIR /src
 
 RUN cargo install --locked cargo-pgrx --version ${PGRX_VERSION} \
- && cargo pgrx init --pg${PG_MAJOR} /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+ && cargo pgrx init \
+      --pg17 /usr/lib/postgresql/17/bin/pg_config \
+      --pg18 /usr/lib/postgresql/18/bin/pg_config
 
+FROM toolchain AS build
+ARG PG_MAJOR
 COPY --chown=dev:dev . .
-
-# Produces target/release/${EXT_NAME}-pg${PG_MAJOR}/ laid out as an install tree.
-RUN cargo pgrx package --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
+# Produces target/release/pg_profiler-pg${PG_MAJOR}/ laid out as an install tree.
+RUN cargo pgrx package --no-default-features --features pg${PG_MAJOR} \
+      --pg-config /usr/lib/postgresql/${PG_MAJOR}/bin/pg_config
 
 FROM postgres:${PG_MAJOR}-bookworm AS postgres
 ARG PG_MAJOR
-ARG EXT_NAME=pg_trace
-
-COPY --from=builder /src/target/release/${EXT_NAME}-pg${PG_MAJOR}/ /
+COPY --from=build /src/target/release/pg_profiler-pg${PG_MAJOR}/ /
 
 # Hooks and shared memory need the library preloaded at server start.
-CMD ["postgres", "-c", "shared_preload_libraries=pg_trace"]
+CMD ["postgres", "-c", "shared_preload_libraries=pg_profiler"]

@@ -1,0 +1,6 @@
+comment = 'Per-execution query tracing (requires shared_preload_libraries)'
+default_version = '@CARGO_VERSION@'
+module_pathname = 'pg_profiler'
+relocatable = false
+superuser = true
+trusted = false

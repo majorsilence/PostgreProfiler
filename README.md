@@ -10,7 +10,7 @@ locally besides Docker.
 ```sh
 # Compile, lint and test inside the Rust + pgrx container
 docker compose run --rm builder cargo clippy -- -D warnings
-docker compose run --rm builder cargo pgrx test pg17
+docker compose run --rm builder cargo pgrx test pg18
 
 # Build the extension into a Postgres image and run it
 docker compose up --build db
