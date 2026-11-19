@@ -33,6 +33,8 @@ RUN apt-get update \
 # Postgres refuses to run as root, and `cargo pgrx test/run` starts it, so
 # build and test as an unprivileged user that may write the PG install dirs
 # (cargo pgrx test installs the extension into them).
+RUN rustup component add clippy rustfmt
+
 RUN useradd --create-home --uid 1000 dev \
  && install -d -o dev -g dev /src /src/target \
  && for v in 17 18; do \

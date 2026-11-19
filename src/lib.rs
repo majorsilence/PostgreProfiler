@@ -1,10 +1,18 @@
 use pgrx::prelude::*;
 
+mod gucs;
+
 ::pgrx::pg_module_magic!(name, version);
 
-#[pg_extern]
-fn hello_pg_profiler() -> &'static str {
-    "Hello, pg_profiler"
+#[pg_guard]
+pub extern "C-unwind" fn _PG_init() {
+    // The ring buffer and hooks need postmaster-time setup, so the library
+    // must be in shared_preload_libraries. If it is merely loaded (e.g. by
+    // CREATE EXTENSION) we do nothing; SQL functions then raise a clear error.
+    if unsafe { !pg_sys::process_shared_preload_libraries_in_progress } {
+        return;
+    }
+    gucs::register();
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -13,23 +21,15 @@ mod tests {
     use pgrx::prelude::*;
 
     #[pg_test]
-    fn test_hello_pg_profiler() {
-        assert_eq!("Hello, pg_profiler", crate::hello_pg_profiler());
-    }
-
-}
-
-#[cfg(feature = "pg_bench")]
-#[pg_schema]
-mod benches {
-    use pgrx::prelude::*;
-    use pgrx_bench::{Bencher, black_box};
-
-    #[pg_bench]
-    fn bench_hello_pg_profiler(b: &mut Bencher) {
-        b.iter(|| {
-            black_box(crate::hello_pg_profiler());
-        });
+    fn test_guc_defaults() {
+        assert_eq!(
+            Spi::get_one::<String>("SHOW pg_profiler.track").unwrap().as_deref(),
+            Some("top")
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SHOW pg_profiler.buffer_size").unwrap().as_deref(),
+            Some("10000")
+        );
     }
 }
 
@@ -37,13 +37,10 @@ mod benches {
 /// It must be visible at the root of your extension crate.
 #[cfg(test)]
 pub mod pg_test {
-    pub fn setup(_options: Vec<&str>) {
-        // perform one-off initialization when the pg_test framework starts
-    }
+    pub fn setup(_options: Vec<&str>) {}
 
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        // return any postgresql.conf settings that are required for your tests
-        vec![]
+        vec!["shared_preload_libraries='pg_profiler'"]
     }
 }
