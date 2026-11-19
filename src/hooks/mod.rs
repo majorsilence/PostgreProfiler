@@ -4,6 +4,7 @@
 use pgrx::prelude::*;
 
 mod executor;
+mod planner;
 
 /// Slice of `source` that belongs to the statement at `loc`/`len`
 /// (`PlannedStmt.stmt_location` / `stmt_len`). `-1`/`0` mean "the whole
@@ -20,11 +21,29 @@ pub unsafe fn statement_text<'a>(source: *const std::ffi::c_char, loc: i32, len:
         return all;
     }
     let rest = &all[loc as usize..];
-    if len > 0 && (len as usize) < rest.len() {
-        &rest[..len as usize]
-    } else {
-        rest
+    let stmt = if len > 0 && (len as usize) < rest.len() { &rest[..len as usize] } else { rest };
+    trim_statement(stmt)
+}
+
+/// Strip leading whitespace and trailing whitespace/semicolons, as
+/// pg_stat_statements' `CleanQuerytext` does. (The range the parser reports
+/// for a statement in a multi-statement string differs by version.)
+fn trim_statement(mut s: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = s {
+        if first.is_ascii_whitespace() {
+            s = rest;
+        } else {
+            break;
+        }
     }
+    while let [rest @ .., last] = s {
+        if last.is_ascii_whitespace() || *last == b';' {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
 }
 
 pub fn install() {
@@ -32,6 +51,7 @@ pub fn install() {
         // Make sure the core computes query ids even without pg_stat_statements.
         pg_sys::EnableQueryId();
     }
+    planner::install();
     executor::install();
     unsafe {
         pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());

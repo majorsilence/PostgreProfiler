@@ -16,11 +16,27 @@ pub struct StartInfo {
     pub plan_us: f64,
     pub nesting: i32,
     pub subid: pg_sys::SubTransactionId,
+    /// CPU time (user, system) of this process when the statement started.
+    pub cpu_user_us: i64,
+    pub cpu_sys_us: i64,
+}
+
+/// Cumulative (user, system) CPU time of this process in microseconds.
+pub fn cpu_now() -> (i64, i64) {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } != 0 {
+        return (0, 0);
+    }
+    #[allow(clippy::unnecessary_cast)] // field widths differ across platforms
+    let us = |t: libc::timeval| t.tv_sec as i64 * 1_000_000 + t.tv_usec as i64;
+    (us(ru.ru_utime), us(ru.ru_stime))
 }
 
 thread_local! {
     static NESTING: Cell<i32> = const { Cell::new(0) };
     static SAMPLED: Cell<bool> = const { Cell::new(true) };
+    /// (address of the last PlannedStmt we timed, planning time in us)
+    static PLAN_STASH: Cell<(usize, f64)> = const { Cell::new((0, 0.0)) };
     static STARTS: RefCell<Vec<StartInfo>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -40,6 +56,26 @@ pub fn leave() {
 pub fn reset_all() {
     NESTING.with(|n| n.set(0));
     STARTS.with(|s| s.borrow_mut().clear());
+    PLAN_STASH.with(|p| p.set((0, 0.0)));
+}
+
+/// Remember the planning time of the plan the planner just produced.
+pub fn stash_plan(stmt: *mut pg_sys::PlannedStmt, plan_us: f64) {
+    PLAN_STASH.with(|p| p.set((stmt as usize, plan_us)));
+}
+
+/// Planning time for `stmt`, if the planner we hooked produced it just now.
+/// Plans from the plan cache (prepared statements) report 0.
+pub fn take_plan_time(stmt: *mut pg_sys::PlannedStmt) -> f64 {
+    PLAN_STASH.with(|p| {
+        let (addr, us) = p.get();
+        if addr == stmt as usize && addr != 0 {
+            p.set((0, 0.0));
+            us
+        } else {
+            0.0
+        }
+    })
 }
 
 /// A subtransaction aborted: forget statements that started inside it.

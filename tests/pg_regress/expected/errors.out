@@ -16,3 +16,20 @@ SELECT is_error, sqlstate, cmd_type, rows
  t        | 22012    | select   |    0
 (1 row)
 
+-- constant folding fails in the planner, before the executor starts
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+SELECT 1 / 0 AS regress_marker_planerr;
+ERROR:  division by zero
+SELECT is_error, sqlstate, cmd_type
+  FROM pg_profiler()
+ WHERE query LIKE 'SELECT 1 / 0 AS regress_marker_planerr%';
+ is_error | sqlstate | cmd_type 
+----------+----------+----------
+ t        | 22012    | select
+(1 row)
+

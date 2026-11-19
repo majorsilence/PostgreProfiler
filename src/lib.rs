@@ -123,6 +123,69 @@ mod tests {
         .unwrap();
         assert_eq!(state.as_deref(), Some("22012"));
     }
+
+    #[pg_test]
+    fn test_plan_time_cpu_and_text_slice() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        // two statements in one string: only the second one's text is stored
+        Spi::run("SELECT 1 AS pg_profiler_marker_first; SELECT 2 AS pg_profiler_marker_slice")
+            .unwrap();
+        let q = Spi::get_one::<String>(
+            "SELECT query FROM pg_profiler() WHERE query LIKE '%pg_profiler_marker_slice%'              AND query NOT LIKE '%pg_profiler()%' ORDER BY seq DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(q.as_deref(), Some("SELECT 2 AS pg_profiler_marker_slice"));
+
+        // a CPU-bound statement reports non-zero cpu and plan time
+        Spi::run("SELECT count(*) AS pg_profiler_marker_cpu FROM generate_series(1, 2000000)")
+            .unwrap();
+        let (cpu, plan) = Spi::get_two::<f64, f64>(
+            "SELECT cpu_user_ms + cpu_sys_ms, plan_time_ms FROM pg_profiler()              WHERE query LIKE '%pg_profiler_marker_cpu%' AND query NOT LIKE '%pg_profiler()%'              ORDER BY seq DESC LIMIT 1",
+        )
+        .unwrap();
+        assert!(cpu.unwrap() > 0.0, "cpu {cpu:?}");
+        assert!(plan.unwrap() > 0.0, "plan {plan:?}");
+    }
+
+    #[pg_test]
+    fn test_planner_error_is_recorded() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        // 1/0 is constant-folded, so it fails in the planner
+        Spi::run(
+            "DO $$ BEGIN PERFORM 1 / 0 AS pg_profiler_marker_planerr;              EXCEPTION WHEN division_by_zero THEN NULL; END $$",
+        )
+        .unwrap();
+        let state = Spi::get_one::<String>(
+            "SELECT sqlstate FROM pg_profiler() WHERE is_error              AND query LIKE '%pg_profiler_marker_planerr%' AND query NOT LIKE 'DO%'              AND query NOT LIKE '%pg_profiler()%'",
+        )
+        .unwrap();
+        assert_eq!(state.as_deref(), Some("22012"));
+    }
+
+    #[pg_test]
+    fn test_query_text_hidden_from_other_users() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("CREATE ROLE profiler_peon").unwrap();
+        Spi::run("SELECT 1 AS pg_profiler_marker_secret").unwrap();
+        let visible = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler() WHERE query LIKE 'SELECT 1 AS pg_profiler_marker_secret%'",
+        )
+        .unwrap();
+        assert_eq!(visible, Some(1));
+
+        Spi::run("SET LOCAL ROLE profiler_peon").unwrap();
+        let visible = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler() WHERE query LIKE '%pg_profiler_marker_secret%'",
+        )
+        .unwrap();
+        assert_eq!(visible, Some(0));
+        let masked = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler() WHERE query = '<insufficient privilege>'",
+        )
+        .unwrap();
+        assert!(masked.unwrap() >= 1);
+        Spi::run("RESET ROLE").unwrap();
+    }
 }
 
 /// This module is required by `cargo pgrx test` invocations.

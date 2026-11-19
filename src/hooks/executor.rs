@@ -76,12 +76,15 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
             });
         }
 
+        let (cpu_user_us, cpu_sys_us) = backend::cpu_now();
         backend::push_start(StartInfo {
             qd,
             start_ts: pg_sys::GetCurrentTimestamp(),
-            plan_us: 0.0,
+            plan_us: backend::take_plan_time((*qd).plannedstmt),
             nesting: level,
             subid: pg_sys::GetCurrentSubTransactionId(),
+            cpu_user_us,
+            cpu_sys_us,
         });
     }
 }
@@ -175,6 +178,7 @@ fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
         rec.plan_time_us = info.plan_us;
         rec.is_error = true;
         rec.sqlstate = error_sqlstate(e);
+        set_cpu(&mut rec, &info);
         let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
         ring::push(&rec, text);
     }
@@ -209,11 +213,19 @@ unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
         rec.exec_time_us = tt.total * 1_000_000.0;
         rec.plan_time_us = info.plan_us;
         rec.rows = (*(*qd).estate).es_total_processed;
+        set_cpu(&mut rec, info);
         fill_usage(&mut rec, &tt.bufusage, &tt.walusage);
 
         let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
         ring::push(&rec, text);
     }
+}
+
+/// Fill the CPU fields with the delta since the statement started.
+pub fn set_cpu(rec: &mut TraceRecord, info: &StartInfo) {
+    let (user, sys) = backend::cpu_now();
+    rec.cpu_user_us = (user - info.cpu_user_us).max(0);
+    rec.cpu_sys_us = (sys - info.cpu_sys_us).max(0);
 }
 
 pub fn fill_usage(rec: &mut TraceRecord, buf: &pg_sys::BufferUsage, wal: &pg_sys::WalUsage) {

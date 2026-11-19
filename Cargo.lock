@@ -542,6 +542,7 @@ dependencies = [
 name = "pg_profiler"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pgrx",
  "pgrx-bench",
  "pgrx-tests",

@@ -68,13 +68,23 @@ fn pg_profiler_rows(lim: default!(i32, 1000)) -> TableIterator<
 > {
     ring::ensure_ready();
     let rows = ring::snapshot(lim.max(0) as usize);
-    TableIterator::new(rows.into_iter().map(|(r, text)| {
+    // Same visibility rule as pg_stat_statements: query text of other users'
+    // statements is hidden unless the caller is a superuser or has the
+    // privileges of pg_read_all_stats.
+    let me = unsafe { pg_sys::GetUserId() };
+    let sees_all = unsafe {
+        pg_sys::superuser()
+            || pg_sys::has_privs_of_role(me, pg_sys::Oid::from(pg_sys::ROLE_PG_READ_ALL_STATS))
+    };
+    TableIterator::new(rows.into_iter().map(move |(r, text)| {
         let sqlstate = if r.is_error {
             Some(String::from_utf8_lossy(&r.sqlstate).into_owned())
         } else {
             None
         };
-        let query = if r.query_len > 0 {
+        let query = if !sees_all && r.userid != me.to_u32() {
+            Some("<insufficient privilege>".to_string())
+        } else if r.query_len > 0 {
             Some(String::from_utf8_lossy(&text).into_owned())
         } else {
             None
