@@ -175,3 +175,39 @@ extern "C-unwind"` and always chains to the previous hook or `standard_*`.
   `pgbench -i && pgbench -T 30 -c 8` against the container. Confirm there are no
   crashes, the row counts are sensible, and `pg_profiler_info().overwritten` grows once
   the ring wraps.
+
+## Phase 2 (after v1): OTLP trace export
+
+Goal: ship each recorded execution as an OpenTelemetry span to an OTLP collector, without ever slowing backends.
+
+### Design
+- **Exporter background worker.** Register it in `_PG_init` with `pgrx::bgworkers::BackgroundWorkerBuilder` only when `pg_profiler.otlp_enabled` (POSTMASTER) is on. It connects to no database because it only reads shared memory. It sleeps on `BackgroundWorker::wait_latch(export_interval)`, reloads config on SIGHUP and exits on SIGTERM.
+- **Ring cursor.** Add `export_cursor: u64` and the counters `exported`, `export_dropped` and `export_errors` (plus `last_export_error_at`) to `RingHeader`. Each cycle the worker copies up to `batch_size` slots from `export_cursor` to `head` under `LW_SHARED`. If the writer has lapped it (`head - export_cursor > capacity`), it skips forward and adds the gap to `export_dropped`. Backends never wait on the exporter. `pg_profiler_info()` exposes the new counters.
+- **Span identity.** Add `trace_id: [u8;16]`, `span_id: [u8;8]` and `parent_span_id: [u8;8]` to `TraceRecord`. Backends assign them in ExecutorStart/ProcessUtility from the per-backend nesting stack:
+  - A top-level statement gets a new random trace_id (`pg_prng`).
+  - A nested statement inherits the trace_id and gets its parent's span_id as `parent_span_id`.
+  - Later: honour an incoming W3C `traceparent` passed as a sqlcommenter comment (`/*traceparent='00-…'*/`) on the top-level statement, as pg_tracing does.
+- **Span mapping.**
+  - name = `db.operation.name` + target, or the command type.
+  - start = `start_ts`, end = `start_ts + exec_time`.
+  - status = ERROR when `is_error`.
+  - Attributes follow the OTel DB semantic conventions: `db.system.name=postgresql`, `db.namespace` (database name), `db.operation.name`, `db.query.text` (only when `pg_profiler.otlp_include_query_text`), `db.response.status_code` (SQLSTATE). Add `pg_profiler.*` attributes for queryid, rows, plan_time, block and WAL counters, CPU, userid and pid.
+  - Resource attributes: `service.name` (GUC) and `host.name`.
+  - Planning becomes an optional child span.
+- **Transport.** OTLP/HTTP with protobuf (`POST {endpoint}/v1/traces`). Use the prost types from the `opentelemetry-proto` crate and a blocking HTTP client (`ureq` with rustls). gzip is optional. No tonic/gRPC and no tokio runtime in v2, because the worker is single-threaded and batched. Retry with exponential backoff and cap the retries. On persistent failure, drop batches (count them) instead of buffering without limit.
+- **GUCs.**
+  - POSTMASTER: `pg_profiler.otlp_enabled` (bool, off).
+  - SIGHUP: `pg_profiler.otlp_endpoint` (string, default `http://localhost:4318`), `pg_profiler.otlp_headers` (string, `k=v,k=v` for auth), `pg_profiler.otlp_service_name` (default `postgresql`), `pg_profiler.otlp_include_query_text` (bool, on), `pg_profiler.otlp_export_interval_ms` (1000), `pg_profiler.otlp_batch_size` (512), `pg_profiler.otlp_timeout_ms` (5000).
+
+### Implementation order
+1. TraceRecord span ids + nesting-stack propagation (tests: nested statement shares trace_id and links parent). Note: the v1 per-backend start stack (`backend::STARTS`) only holds executor statements; ProcessUtility entries are not pushed onto it, so utility commands must be added to the stack for their nested statements to find a parent span.
+2. Ring export cursor + counters + `pg_profiler_info()` columns.
+3. Background worker skeleton (latch loop, SIGHUP/SIGTERM, reads batches, logs counts).
+4. OTLP protobuf mapping (unit-test the record → `ResourceSpans` conversion in plain Rust).
+5. HTTP transport, retries, drop accounting.
+6. Optional: `traceparent` sqlcommenter propagation.
+
+### Verification
+- Add an `otel-collector` service (otel/opentelemetry-collector-contrib with the `debug` exporter, or Jaeger all-in-one) to `docker-compose.yml`, and point `db` at it with `pg_profiler.otlp_enabled=on`.
+- Run queries, nested functions and an error. Confirm in the collector output or the Jaeger UI that the spans have the correct parent/child links, timings, status and attributes.
+- Stop the collector during `pgbench`. Backend latency must not change, and `export_dropped`/`export_errors` must rise and then recover when the collector returns.
