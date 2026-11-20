@@ -76,6 +76,7 @@ SELECT * FROM pg_profiler_info();
 | `application_name`, `client_addr` | Session context (`client_addr` is `[local]` for unix sockets) |
 | `xid` | Transaction id, null if none had been assigned yet |
 | `queryid` | Core query id (same as `pg_stat_statements`) |
+| `plan_id` | Fingerprint of the plan shape (see [Plans](#plans)); 0 for utility statements |
 | `cmd_type` | `select`, `insert`, `update`, `delete`, `merge` or `utility` |
 | `nesting` | 0 for top-level statements, greater for statements run inside functions |
 | `exec_time_ms`, `plan_time_ms` | Execution and planning time. Plan time is 0 for cached plans (prepared statements) |
@@ -84,11 +85,54 @@ SELECT * FROM pg_profiler_info();
 | `shared_blks_*`, `temp_blks_*` | Buffer usage |
 | `blk_read_time_ms`, `blk_write_time_ms` | I/O time (needs `track_io_timing = on`) |
 | `wal_records`, `wal_fpi`, `wal_bytes` | WAL usage |
-| `is_error`, `sqlstate` | Whether the statement failed, and with which SQLSTATE |
+| `sqlstate` | SQLSTATE if the statement failed, otherwise null |
 | `query` | Statement text (only that statement of a multi-statement string) |
 | `params` | Bind parameters, e.g. `$1 = '42'` (null unless parameter capture is on) |
 
-The views add a `toplevel` column (`nesting = 0`).
+The views add `toplevel` (`nesting = 0`) and `is_error` (`sqlstate IS NOT NULL`) columns.
+
+### Plans
+
+Every recorded statement carries a `plan_id`: a fingerprint of the *shape* of its
+plan (node types, tables, indexes, join types, aggregate strategies, tree
+structure). Costs, row estimates, constants and parameters are left out, so a
+query keeps one `plan_id` until the planner picks something else, for example
+after an index is dropped or statistics change. The value is only meaningful on
+the server version that produced it.
+
+```sql
+-- queries that ran with more than one plan shape (candidates for a regression)
+SELECT queryid, plans, calls, fastest_avg_ms, slowest_avg_ms, slowdown, query
+  FROM pg_profiler_plan_changes ORDER BY slowdown DESC;
+
+-- one row per (query, plan) with its timings
+SELECT queryid, plan_id, calls, avg_exec_ms, max_exec_ms, last_seen FROM pg_profiler_plan_stats;
+
+-- stored plans: EXPLAIN text (or JSON), newest first
+SELECT ts, reason, exec_time_ms, max_misestimate, plan FROM pg_profiler_plans(20);
+SELECT * FROM pg_profiler_plans_since(41, 100);     -- incremental, oldest first
+```
+
+A plan is stored in the plan ring when
+
+- its shape is seen for the first time for that database and query
+  (`reason = new`; estimates only, no actual rows), or
+- the statement was one of the `pg_profiler.plan_sample_rate` sample, which runs
+  with per-node row counting, **and** the run was slower than
+  `pg_profiler.plan_outlier_ms` (`slow`), wrote temporary files (`spill`), or had
+  a row estimate off by more than `pg_profiler.plan_misestimate_ratio`
+  (`misestimate`). Such a plan has actual row counts (`has_actuals`) and
+  `max_misestimate` is the largest factor found. Estimates of nodes below a
+  `LIMIT` and of parallel-aware nodes are ignored, and tiny row counts (under 100)
+  too.
+
+Each plan is stored once per combination of reasons, until `pg_profiler_reset()`
+or until it is pushed out of the small table of plans already seen, so a
+recurring outlier does not flood the ring. With `plan_sample_rate = 0` (the
+default) nothing runs with row counting. `pg_profiler.plan_format` chooses text
+or JSON (`EXPLAIN (FORMAT JSON)` layout, suitable for plan viewers). Plan text
+follows the same visibility rule as query text, and can contain constants from
+the query.
 
 ### Events (`pg_profiler_events()`, `pg_profiler_events_since()`)
 
@@ -134,7 +178,7 @@ buffer churn but not instrumentation overhead.
 
 `profiler_reader` and `profiler_admin` are created by `CREATE EXTENSION`; grant
 `profiler_reader` to the account a monitoring tool uses. The SQL surface
-(`pg_profiler_api_version()` = 1) is what the planned GUI relies on.
+(`pg_profiler_api_version()` = 2) is what the planned GUI relies on.
 
 ### Configuration
 
@@ -154,11 +198,20 @@ buffer churn but not instrumentation overhead.
 | `pg_profiler.events_buffer_size` | `2000` | restart | Number of events kept |
 | `pg_profiler.event_detail_len` | `2048` | restart | Bytes of detail text kept per event |
 | `pg_profiler.running_query_len` | `1024` | restart | Bytes of text kept per backend for the running view |
+| `pg_profiler.capture_plans` | `on` | superuser | Store the plan of each new plan shape |
+| `pg_profiler.plan_format` | `text` | superuser | `text` or `json` |
+| `pg_profiler.plan_buffer_size` | `500` | restart | Number of plans kept |
+| `pg_profiler.max_plan_len` | `8192` | restart | Bytes of plan text kept per plan. `0` turns plan capture off and allocates no space |
+| `pg_profiler.plan_sample_rate` | `0` | superuser | Fraction (0–1) of statements run with row counting so that outliers can be stored with actual rows |
+| `pg_profiler.plan_outlier_ms` | `1000` | superuser | A sampled statement slower than this is stored with actual rows (`0` = off) |
+| `pg_profiler.plan_misestimate_ratio` | `100` | superuser | A sampled statement with an estimate off by more than this factor is stored (`0` = off) |
 
-Memory: everything is allocated once at server start. A statement slot is 328
+Memory: everything is allocated once at server start. A statement slot is 336
 bytes + `max_query_len` + `max_param_len`; an event slot is 160 bytes +
-`event_detail_len`; the running view costs `max_connections` × (about 70 bytes +
-`running_query_len`). With the defaults that is about 24 MB + 4.4 MB + 0.1 MB.
+`event_detail_len`; a plan slot is 88 bytes + `max_plan_len` + `max_query_len`;
+the running view costs `max_connections` × (about 70 bytes + `running_query_len`);
+the table of plans already seen is 128 KB. With the defaults that is about
+24 MB + 4.4 MB + 5 MB + 0.1 MB.
 When a ring is full the oldest rows are overwritten (`pg_profiler_info()` counts
 them).
 

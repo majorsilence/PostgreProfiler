@@ -3,6 +3,7 @@ use pgrx::prelude::*;
 mod backend;
 mod events;
 mod gucs;
+mod plan;
 mod hooks;
 mod record;
 mod rules;
@@ -61,7 +62,7 @@ mod tests {
         .unwrap();
         assert_eq!(rows, Some(1));
         let (rows, cmd, err) = Spi::get_three::<i64, String, bool>(
-            "SELECT rows, cmd_type, is_error FROM pg_profiler() WHERE query LIKE 'SELECT 42 AS pg_profiler_marker_4%'",
+            "SELECT rows, cmd_type, sqlstate IS NOT NULL FROM pg_profiler() WHERE query LIKE 'SELECT 42 AS pg_profiler_marker_4%'",
         )
         .unwrap();
         assert_eq!(rows, Some(1));
@@ -136,7 +137,7 @@ mod tests {
         )
         .unwrap();
         let state = Spi::get_one::<String>(
-            "SELECT sqlstate FROM pg_profiler() WHERE is_error              AND query LIKE '%pg_profiler_marker_err%' AND query NOT LIKE 'DO%'              AND query NOT LIKE '%pg_profiler()%'",
+            "SELECT sqlstate FROM pg_profiler() WHERE sqlstate IS NOT NULL              AND query LIKE '%pg_profiler_marker_err%' AND query NOT LIKE 'DO%'              AND query NOT LIKE '%pg_profiler()%'",
         )
         .unwrap();
         assert_eq!(state.as_deref(), Some("22012"));
@@ -174,7 +175,7 @@ mod tests {
         )
         .unwrap();
         let state = Spi::get_one::<String>(
-            "SELECT sqlstate FROM pg_profiler() WHERE is_error              AND query LIKE '%pg_profiler_marker_planerr%' AND query NOT LIKE 'DO%'              AND query NOT LIKE '%pg_profiler()%'",
+            "SELECT sqlstate FROM pg_profiler() WHERE sqlstate IS NOT NULL              AND query LIKE '%pg_profiler_marker_planerr%' AND query NOT LIKE 'DO%'              AND query NOT LIKE '%pg_profiler()%'",
         )
         .unwrap();
         assert_eq!(state.as_deref(), Some("22012"));
@@ -263,6 +264,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(n, Some(1));
+    }
+
+    #[pg_test]
+    fn test_plan_text_hidden_from_other_users() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("CREATE ROLE profiler_plan_peon").unwrap();
+        Spi::run("SELECT pg_profiler_reset()").unwrap();
+        Spi::run("SELECT 1 + 2 AS pg_profiler_marker_plan").unwrap();
+        let mine = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler_plans() WHERE query LIKE 'SELECT 1 + 2 AS pg_profiler_marker_plan%' AND plan LIKE '%Result%'",
+        )
+        .unwrap();
+        assert_eq!(mine, Some(1));
+
+        Spi::run("SET LOCAL ROLE profiler_plan_peon").unwrap();
+        let leaked = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler_plans() WHERE (plan LIKE '%Result%' OR query LIKE '%pg_profiler_marker_plan%') AND query NOT LIKE '%pg_profiler_plans%'",
+        )
+        .unwrap();
+        assert_eq!(leaked, Some(0));
+        let masked = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler_plans() WHERE plan = '<insufficient privilege>' AND query = '<insufficient privilege>'",
+        )
+        .unwrap();
+        assert!(masked.unwrap() >= 1);
+        Spi::run("RESET ROLE").unwrap();
     }
 
     #[pg_test]

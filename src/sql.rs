@@ -1,12 +1,12 @@
 //! SQL-facing functions and views.
 
-use crate::record::{c_bytes, cmd, copy_into, event, EventRecord, TraceRecord};
+use crate::record::{c_bytes, cmd, copy_into, event, plan_reason, EventRecord, PlanRecord, TraceRecord};
 use crate::{gucs, ring, rules, running};
 use pgrx::prelude::*;
 
 /// Version of the SQL surface that clients (the GUI) can rely on. Bumped on
 /// incompatible changes to the columns of the functions and views below.
-const API_VERSION: i32 = 1;
+const API_VERSION: i32 = 2;
 
 #[pg_extern]
 fn pg_profiler_api_version() -> i32 {
@@ -34,11 +34,16 @@ fn pg_profiler_info() -> TableIterator<
         name!(events_total_written, i64),
         name!(events_retained, i64),
         name!(events_overwritten, i64),
+        name!(plans_capacity, i64),
+        name!(plans_total_written, i64),
+        name!(plans_retained, i64),
+        name!(plans_overwritten, i64),
     ),
 > {
     ring::ensure_ready();
     let s = ring::stmt_ring().stats();
     let e = ring::event_ring().stats();
+    let p = ring::plan_ring().stats();
     TableIterator::once((
         s.capacity,
         s.total_written,
@@ -51,6 +56,10 @@ fn pg_profiler_info() -> TableIterator<
         e.total_written,
         e.retained,
         e.overwritten,
+        if gucs::MAX_PLAN_LEN.get() > 0 { p.capacity } else { 0 },
+        p.total_written,
+        p.retained,
+        p.overwritten,
     ))
 }
 
@@ -60,6 +69,8 @@ fn pg_profiler_reset() {
     ring::ensure_ready();
     ring::stmt_ring().reset();
     ring::event_ring().reset();
+    ring::plan_ring().reset();
+    ring::plan_seen_clear();
 }
 
 /// Who may see query text and parameters of other users' statements:
@@ -129,6 +140,7 @@ type StmtRow = (
     Option<String>,
     Option<i64>,
     i64,
+    i64,
     String,
     i32,
     f64,
@@ -147,7 +159,6 @@ type StmtRow = (
     i64,
     i64,
     i64,
-    bool,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -173,6 +184,7 @@ fn stmt_row(vis: &Visibility, (r, payload): (TraceRecord, Vec<u8>)) -> StmtRow {
         cstr_opt(&r.client_addr),
         if r.xid == 0 { None } else { Some(i64::from(r.xid)) },
         r.queryid,
+        r.plan_id,
         cmd::name(r.cmd_type).to_string(),
         r.nesting,
         r.exec_time_us / 1000.0,
@@ -191,7 +203,6 @@ fn stmt_row(vis: &Visibility, (r, payload): (TraceRecord, Vec<u8>)) -> StmtRow {
         r.wal_records,
         r.wal_fpi,
         r.wal_bytes as i64,
-        r.is_error,
         if r.is_error { cstr_opt(&r.sqlstate) } else { None },
         query,
         params,
@@ -216,6 +227,7 @@ fn pg_profiler_rows(
         name!(client_addr, Option<String>),
         name!(xid, Option<i64>),
         name!(queryid, i64),
+        name!(plan_id, i64),
         name!(cmd_type, String),
         name!(nesting, i32),
         name!(exec_time_ms, f64),
@@ -234,7 +246,6 @@ fn pg_profiler_rows(
         name!(wal_records, i64),
         name!(wal_fpi, i64),
         name!(wal_bytes, i64),
-        name!(is_error, bool),
         name!(sqlstate, Option<String>),
         name!(query, Option<String>),
         name!(params, Option<String>),
@@ -268,6 +279,7 @@ fn pg_profiler_since_rows(
         name!(client_addr, Option<String>),
         name!(xid, Option<i64>),
         name!(queryid, i64),
+        name!(plan_id, i64),
         name!(cmd_type, String),
         name!(nesting, i32),
         name!(exec_time_ms, f64),
@@ -286,7 +298,6 @@ fn pg_profiler_since_rows(
         name!(wal_records, i64),
         name!(wal_fpi, i64),
         name!(wal_bytes, i64),
-        name!(is_error, bool),
         name!(sqlstate, Option<String>),
         name!(query, Option<String>),
         name!(params, Option<String>),
@@ -390,6 +401,123 @@ fn pg_profiler_events_since_rows(
     let vis = visibility();
     let rows = ring::event_ring().since(after_seq, max_rows.max(0) as usize);
     TableIterator::new(rows.into_iter().map(move |r| event_row(&vis, r)))
+}
+
+#[allow(clippy::type_complexity)]
+type PlanRow = (
+    i64,
+    Option<TimestampWithTimeZone>,
+    i64,
+    i64,
+    pg_sys::Oid,
+    pg_sys::Oid,
+    i32,
+    String,
+    String,
+    bool,
+    f64,
+    f64,
+    f64,
+    i64,
+    Option<String>,
+    Option<String>,
+);
+
+fn plan_row(vis: &Visibility, (r, payload): (PlanRecord, Vec<u8>)) -> PlanRow {
+    let p_len = (r.plan_len as usize).min(payload.len());
+    let (plan, query) = payload.split_at(p_len);
+    let visible = vis.sees_all || r.userid == vis.me.to_u32();
+    let (plan, query) = if visible {
+        (text_of(plan), text_of(query))
+    } else {
+        (text_of(plan).map(|_| MASKED.to_string()), text_of(query).map(|_| MASKED.to_string()))
+    };
+    (
+        r.seq as i64,
+        ts(r.ts),
+        r.queryid,
+        r.plan_id,
+        pg_sys::Oid::from(r.userid),
+        pg_sys::Oid::from(r.dbid),
+        r.pid,
+        plan_reason::names(r.reasons),
+        if r.format == 1 { "json" } else { "text" }.to_string(),
+        r.analyzed,
+        r.exec_time_us / 1000.0,
+        r.plan_rows,
+        r.max_misestimate,
+        r.temp_blks_written,
+        plan,
+        query,
+    )
+}
+
+/// The newest `lim` stored plans, newest first. A plan is stored the first
+/// time its shape is seen for a query (`reason` = `new`) and, for sampled
+/// statements, when a run was slow, spilled or had a bad estimate (the plan then
+/// carries actual row counts).
+#[pg_extern(name = "pg_profiler_plans")]
+#[allow(clippy::type_complexity)]
+fn pg_profiler_plans_rows(
+    lim: default!(i32, 100),
+) -> TableIterator<
+    'static,
+    (
+        name!(seq, i64),
+        name!(ts, Option<TimestampWithTimeZone>),
+        name!(queryid, i64),
+        name!(plan_id, i64),
+        name!(userid, pg_sys::Oid),
+        name!(dbid, pg_sys::Oid),
+        name!(pid, i32),
+        name!(reason, String),
+        name!(format, String),
+        name!(has_actuals, bool),
+        name!(exec_time_ms, f64),
+        name!(plan_rows, f64),
+        name!(max_misestimate, f64),
+        name!(temp_blks_written, i64),
+        name!(plan, Option<String>),
+        name!(query, Option<String>),
+    ),
+> {
+    ring::ensure_ready();
+    let vis = visibility();
+    let rows = ring::plan_ring().newest(lim.max(0) as usize);
+    TableIterator::new(rows.into_iter().map(move |r| plan_row(&vis, r)))
+}
+
+/// Incremental read of stored plans, like `pg_profiler_since`.
+#[pg_extern(name = "pg_profiler_plans_since")]
+#[allow(clippy::type_complexity)]
+fn pg_profiler_plans_since_rows(
+    after_seq: i64,
+    max_rows: default!(i32, 100),
+) -> TableIterator<
+    'static,
+    (
+        name!(seq, i64),
+        name!(ts, Option<TimestampWithTimeZone>),
+        name!(queryid, i64),
+        name!(plan_id, i64),
+        name!(userid, pg_sys::Oid),
+        name!(dbid, pg_sys::Oid),
+        name!(pid, i32),
+        name!(reason, String),
+        name!(format, String),
+        name!(has_actuals, bool),
+        name!(exec_time_ms, f64),
+        name!(plan_rows, f64),
+        name!(max_misestimate, f64),
+        name!(temp_blks_written, i64),
+        name!(plan, Option<String>),
+        name!(query, Option<String>),
+    ),
+> {
+    ring::ensure_ready();
+    let vis = visibility();
+    let rows = ring::plan_ring().since(after_seq, max_rows.max(0) as usize);
+    TableIterator::new(rows.into_iter().map(move |r| plan_row(&vis, r)))
 }
 
 /// The statement each backend is running right now (top-level only).
@@ -543,14 +671,46 @@ GRANT EXECUTE ON FUNCTION pg_profiler_rule_remove(int) TO profiler_admin;
 extension_sql!(
     r#"
 CREATE VIEW pg_profiler_recent AS
-    SELECT *, (nesting = 0) AS toplevel FROM pg_profiler(100);
+    SELECT *, (nesting = 0) AS toplevel, (sqlstate IS NOT NULL) AS is_error FROM pg_profiler(100);
 
 CREATE VIEW pg_profiler_slowest AS
-    SELECT *, (nesting = 0) AS toplevel
+    SELECT *, (nesting = 0) AS toplevel, (sqlstate IS NOT NULL) AS is_error
       FROM pg_profiler(2147483647) ORDER BY exec_time_ms DESC LIMIT 100;
 
 CREATE VIEW pg_profiler_errors AS
-    SELECT *, (nesting = 0) AS toplevel FROM pg_profiler(2147483647) WHERE is_error;
+    SELECT *, (nesting = 0) AS toplevel, true AS is_error
+      FROM pg_profiler(2147483647) WHERE sqlstate IS NOT NULL;
+
+-- One row per (database, query, plan shape) that is still in the statement buffer.
+CREATE VIEW pg_profiler_plan_stats AS
+    SELECT dbid, queryid, plan_id,
+           count(*) AS calls,
+           round(avg(exec_time_ms)::numeric, 3) AS avg_exec_ms,
+           max(exec_time_ms) AS max_exec_ms,
+           round(avg(plan_time_ms)::numeric, 3) AS avg_plan_ms,
+           sum(rows) AS rows,
+           sum(shared_blks_read) AS shared_blks_read,
+           sum(temp_blks_written) AS temp_blks_written,
+           min(start_time) AS first_seen,
+           max(start_time) AS last_seen,
+           (array_agg(query ORDER BY seq DESC))[1] AS query
+      FROM pg_profiler(2147483647)
+     WHERE plan_id <> 0 AND sqlstate IS NULL
+     GROUP BY dbid, queryid, plan_id;
+
+-- Queries that ran with more than one plan shape: candidates for a plan regression.
+CREATE VIEW pg_profiler_plan_changes AS
+    SELECT dbid, queryid,
+           count(*) AS plans,
+           sum(calls) AS calls,
+           min(avg_exec_ms) AS fastest_avg_ms,
+           max(avg_exec_ms) AS slowest_avg_ms,
+           round(max(avg_exec_ms) / NULLIF(min(avg_exec_ms), 0), 1) AS slowdown,
+           max(last_seen) AS last_seen,
+           (array_agg(query ORDER BY last_seen DESC))[1] AS query
+      FROM pg_profiler_plan_stats
+     GROUP BY dbid, queryid
+    HAVING count(*) > 1;
 
 CREATE VIEW pg_profiler_activity AS
     SELECT r.pid, a.usename, a.datname, a.application_name, a.client_addr,
@@ -563,7 +723,7 @@ CREATE VIEW pg_profiler_activity AS
       LEFT JOIN pg_stat_activity a USING (pid);
 
 GRANT SELECT ON pg_profiler_recent, pg_profiler_slowest, pg_profiler_errors,
-                pg_profiler_activity TO PUBLIC;
+                pg_profiler_activity, pg_profiler_plan_stats, pg_profiler_plan_changes TO PUBLIC;
 "#,
     name = "views",
     requires = [pg_profiler_rows, pg_profiler_running_rows, "roles_and_grants"]

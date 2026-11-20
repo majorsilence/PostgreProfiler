@@ -17,5 +17,5 @@ SELECT 1 / g AS regress_marker_fast_err FROM generate_series(0, 0) g;
 SET pg_profiler.min_duration_ms = 0;
 SELECT count(*) FILTER (WHERE query LIKE 'SELECT 1 AS regress_marker_fast%') AS fast,
        count(*) FILTER (WHERE query LIKE 'SELECT pg_sleep(0.15), 1 AS regress_marker_slow%') AS slow,
-       count(*) FILTER (WHERE query LIKE 'SELECT 1 / g AS regress_marker_fast_err%' AND is_error) AS err
+       count(*) FILTER (WHERE query LIKE 'SELECT 1 / g AS regress_marker_fast_err%' AND sqlstate IS NOT NULL) AS err
   FROM pg_profiler();

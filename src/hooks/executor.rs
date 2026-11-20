@@ -61,6 +61,12 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
         if !skip && backend::is_tracked(level) {
             (*qd).query_instr_options |= pg_sys::InstrumentOption::INSTRUMENT_ALL as c_int;
         }
+        // Count rows per plan node for a sample of statements, so that an
+        // outlier can be stored with actual rows.
+        let plan_sampled = !skip && backend::is_tracked(level) && crate::plan::sample_for_actuals();
+        if plan_sampled {
+            (*qd).instrument_options |= pg_sys::InstrumentOption::INSTRUMENT_ROWS as c_int;
+        }
 
         match PREV_START {
             Some(prev) => prev(qd, eflags),
@@ -99,6 +105,9 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
             });
         }
 
+        let plan_id = crate::plan::fingerprint((*qd).plannedstmt);
+        crate::plan::capture_new(qd, plan_id);
+
         let (cpu_user_us, cpu_sys_us) = backend::cpu_now();
         backend::push_start(StartInfo {
             qd: qd as usize,
@@ -106,6 +115,8 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
             plan_us: backend::take_plan_time((*qd).plannedstmt),
             nesting: level,
             subid: pg_sys::GetCurrentSubTransactionId(),
+            plan_id,
+            plan_sampled,
             cpu_user_us,
             cpu_sys_us,
             ctx: backend::capture_ctx(),
@@ -198,6 +209,7 @@ fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
         let plan = &*(*qd).plannedstmt;
         let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting, &info.ctx);
         rec.queryid = plan.queryId as _;
+        rec.plan_id = info.plan_id;
         rec.cmd_type = cmd_kind((*qd).operation);
         rec.exec_time_us = (pg_sys::GetCurrentTimestamp() - info.start_ts) as f64;
         rec.plan_time_us = info.plan_us;
@@ -276,15 +288,19 @@ unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
 
         let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting, &info.ctx);
         rec.queryid = plan.queryId as _;
+        rec.plan_id = info.plan_id;
         rec.cmd_type = cmd_kind((*qd).operation);
         rec.exec_time_us = exec_us;
         rec.plan_time_us = info.plan_us;
         rec.rows = (*(*qd).estate).es_total_processed;
         set_cpu(&mut rec, info);
+        fill_usage(&mut rec, &tt.bufusage, &tt.walusage);
+        if info.plan_sampled {
+            crate::plan::capture_outlier(qd, info.plan_id, rec.exec_time_us, rec.temp_blks_written);
+        }
         if backend::below_min_duration(rec.exec_time_us) {
             return;
         }
-        fill_usage(&mut rec, &tt.bufusage, &tt.walusage);
 
         let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
         let params = super::param_text((*qd).params);

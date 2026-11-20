@@ -17,6 +17,11 @@ pub struct StartInfo {
     pub plan_us: f64,
     pub nesting: i32,
     pub subid: pg_sys::SubTransactionId,
+    /// Fingerprint of the plan (0 for utility statements).
+    pub plan_id: i64,
+    /// The statement runs with row counting, so an outlier can be stored with
+    /// actual rows (`pg_profiler.plan_sample_rate`).
+    pub plan_sampled: bool,
     /// CPU time (user, system) of this process when the statement started.
     pub cpu_user_us: i64,
     pub cpu_sys_us: i64,

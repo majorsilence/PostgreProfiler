@@ -138,6 +138,8 @@ unsafe extern "C-unwind" fn process_utility(
             plan_us: 0.0,
             nesting: level,
             subid: pg_sys::GetCurrentSubTransactionId(),
+            plan_id: 0,
+            plan_sampled: false,
             cpu_user_us,
             cpu_sys_us,
             ctx: backend::capture_ctx(),

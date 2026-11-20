@@ -9,7 +9,7 @@ EXECUTE regress_prep;
 DEALLOCATE regress_prep;
 DROP TABLE regress_util;
 
-SELECT cmd_type, rows, is_error, query
+SELECT cmd_type, rows, sqlstate IS NOT NULL AS is_error, query
   FROM pg_profiler()
  WHERE query LIKE '%regress_util%' OR query LIKE '%regress_prep%' OR query LIKE '%regress_marker_prep%'
  ORDER BY seq;
@@ -25,5 +25,5 @@ SELECT count(*) FROM pg_profiler() WHERE query LIKE '%regress_util2%';
 SET pg_profiler.track_utility = on;
 SELECT pg_profiler_reset();
 DROP TABLE regress_does_not_exist;
-SELECT cmd_type, is_error, sqlstate FROM pg_profiler()
+SELECT cmd_type, sqlstate IS NOT NULL AS is_error, sqlstate FROM pg_profiler()
  WHERE query LIKE 'DROP TABLE regress_does_not_exist%';

@@ -4,7 +4,7 @@ SET pg_profiler.track = 'top';
 SELECT pg_profiler_api_version() AS api_version;
  api_version 
 -------------
-           1
+           2
 (1 row)
 
 SELECT 1 AS regress_marker_roles;

@@ -13,7 +13,7 @@ SELECT kind, sqlstate, detail
  WHERE pid = pg_backend_pid() AND kind = 'cancel';
 
 -- the statement itself is an error row too
-SELECT is_error, sqlstate FROM pg_profiler() WHERE query LIKE 'SELECT pg_sleep(2)%';
+SELECT sqlstate IS NOT NULL AS is_error, sqlstate FROM pg_profiler() WHERE query LIKE 'SELECT pg_sleep(2)%';
 
 -- running statements: this backend shows up with its own statement
 SELECT pid = pg_backend_pid() AS own, cmd_type, query

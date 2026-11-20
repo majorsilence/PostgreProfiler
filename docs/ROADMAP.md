@@ -276,14 +276,60 @@ Everything in items 1–8 above exists, with these differences:
   run-to-run noise (about ±15 %), so the "under 3 %" budget is not yet verified;
   that needs a quiet Linux host.
 
-### Phase B: plans and diagnostics  (L)
-1. `plan_id` fingerprint on PG17 and PG18 (tests: same shape → same id,
-   index change → different id, constants ignored).
-2. Plan ring and plan text/JSON capture for new plans.
-3. Sampled instrumentation for outliers; record spill, estimate-vs-actual ratio.
-4. `plan_id` added to each statement record.
-- *Risk:* walking `Plan` trees across versions. Mitigation: one small walker with
-  per-version `cfg` shims, covered by golden-plan tests.
+### Phase B: plans and diagnostics  (L) — built
+
+**Status: implemented** on PG17, PG18 and PG19 (user documentation is in the
+README, "Plans"). What was built, and how it differs from the plan above:
+
+1. **`plan_id`** (`src/plan.rs`). A 64-bit FNV-based hash over the plan tree: node
+   tag, parallel-aware flag, scanned table OID (through the range table), index
+   OID and direction, join type, aggregate strategy/split, set-operation
+   command/strategy, ModifyTable operation and target, then the tree structure
+   (left, right, Append/MergeAppend/BitmapAnd/BitmapOr/CustomScan children,
+   SubqueryScan) and finally the statement's sub-plan list. Costs, row estimates,
+   constants and parameters are not hashed. No per-version `cfg` shims were
+   needed: the node structs read are identical on 17, 18 and 19. Golden tests
+   (pg_regress `plans`): same shape with different constants gives one id; turning
+   index and bitmap scans off gives a second id for the same `queryid`.
+   Not cached by plan pointer (a recycled address could give a stale id); the
+   walk is cheap for OLTP-sized plans, but caching generic plans is a possible
+   optimisation.
+2. **Plan ring** (`PlanRecord`, 88 bytes + `max_plan_len` + `max_query_len`, default
+   500 slots) with text or JSON `EXPLAIN` output built by `ExplainPrintPlan`.
+   A plan is stored the first time a `(database, queryid, plan_id)` is seen. "Seen"
+   is a lock-free table of 16,384 hashes in shared memory (cache semantics: a full
+   neighbourhood evicts an entry, so a plan can be stored again, never missed);
+   `pg_profiler_reset()` clears it. JSON output needs the `Query` group opened
+   around `ExplainPrintPlan`, as `EXPLAIN` does, or the document is invalid.
+3. **Outliers with actuals.** `pg_profiler.plan_sample_rate` (default 0) runs a
+   sample of statements with `INSTRUMENT_ROWS` (row counts, no timing). At
+   `ExecutorEnd`, if the run was slower than `plan_outlier_ms`, wrote temp files
+   (spill) or had an estimate off by more than `plan_misestimate_ratio`, the plan is
+   stored again with actual rows and `max_misestimate`, once per combination of
+   reasons. The estimate check walks the executor state tree, ignoring nodes under
+   a `Limit`, parallel-aware nodes and nodes where both numbers are below 100 rows;
+   merge and semi joins can still make an input look mis-estimated.
+4. `plan_id` is in every statement record and in `pg_profiler()` /
+   `pg_profiler_since()`.
+
+**API version 2.** `pg_profiler()` and `pg_profiler_since()` were already at the 32
+column limit of pgrx table functions, so `is_error` left them (it is
+`sqlstate IS NOT NULL`; the views still have it) to make room for `plan_id`.
+Added `pg_profiler_plans()`, `pg_profiler_plans_since()`, the views
+`pg_profiler_plan_stats` (per query and plan) and `pg_profiler_plan_changes`
+(queries with more than one plan, with slowdown factor), and four plan columns in
+`pg_profiler_info()`.
+
+**Test infrastructure.** The pgrx tests share one server and global state, so a
+concurrent `pg_profiler_reset()` made a test flaky; `.cargo/config.toml` now sets
+`RUST_TEST_THREADS=1`.
+
+**Overhead.** A read-only `pgbench -S` (8 clients, very short statements, Docker
+Desktop, interleaved runs) showed the whole profiler costing roughly 7 % against
+`pg_profiler.enabled = off` with plan capture off; the extra cost of plan
+fingerprinting and `plan_sample_rate = 1` could not be told apart from run-to-run
+noise (about 10 %). That is on the shortest possible statements, but it means the
+"under 3 %" budget is not established; measure on a quiet Linux host.
 
 ### Phase C: Query Store core  (XL)
 1. Aggregate hash with counters, sum of squares, log histogram; capture modes.
@@ -365,8 +411,8 @@ what we did about it:
 
 ### Suggested order
 `A → H → D1 (parallel with B) → C → D2 → E0 → E1/E2/E3 → G`, with F slotted in
-wherever OTLP is wanted. A and H are done; D1 (the GUI skeleton) and B (plans and
-diagnostics) are next.
+wherever OTLP is wanted. A, H and B are done; D1 (the GUI skeleton) and C (Query Store core)
+are next.
 
 ## 6. Cross-cutting concerns
 

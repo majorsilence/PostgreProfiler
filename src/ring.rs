@@ -1,9 +1,9 @@
-//! Shared memory: the statement ring, the event ring, the running-statement
-//! slots and the capture rules, all carved out of one
-//! `ShmemInitStruct("pg_profiler")` area.
+//! Shared memory: the statement ring, the event ring, the plan ring, the
+//! running-statement slots, the capture rules and the table of plans already
+//! seen, all carved out of one `ShmemInitStruct("pg_profiler")` area.
 //!
 //! ```text
-//! [ statement ring ][ event ring ][ running slots ][ rules block ]
+//! [ statement ring ][ event ring ][ plan ring ][ running slots ][ rules block ][ seen plans ]
 //! ring = RingHeader (64 bytes) + capacity slots
 //! slot = record + payload_cap bytes of inline payload (query text, params, ...)
 //! ```
@@ -11,27 +11,31 @@
 //! The sizes depend on GUCs, so the raw `pg_sys` shmem API is used instead of
 //! pgrx's fixed-size `PgLwLock<T>`.
 //!
-//! Locking: one named LWLock tranche with three locks (statement ring, event
-//! ring, rules). `push` prepares everything before taking the lock and only
+//! Locking: one named LWLock tranche with four locks (statement ring, event
+//! ring, rules, plan ring). `push` prepares everything before taking the lock and only
 //! does a memcpy under `LW_EXCLUSIVE`; readers copy rows out under `LW_SHARED`.
 //! Lock-free per-slot seqlocks would remove the writer/reader contention
 //! entirely; that is a possible later optimisation. The running slots are
 //! lock-free (single writer per slot, seqlock readers).
 
 use crate::gucs;
-use crate::record::{EventRecord, TraceRecord};
+use crate::record::{EventRecord, PlanRecord, TraceRecord};
 use crate::{rules, running};
 use pgrx::pg_sys;
 use pgrx::prelude::*;
 use std::marker::PhantomData;
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const SHMEM_NAME: &std::ffi::CStr = c"pg_profiler";
 pub const HEADER_SIZE: usize = 64;
 const LOCK_STMT: usize = 0;
 const LOCK_EVENTS: usize = 1;
 const LOCK_RULES: usize = 2;
-const NUM_LOCKS: i32 = 3;
+const LOCK_PLANS: usize = 3;
+const NUM_LOCKS: i32 = 4;
+/// Entries in the table of plans that were already stored (8 bytes each).
+const SEEN_SLOTS: usize = 16_384;
 
 /// A record that can live in a ring.
 pub trait RingRecord: Copy {
@@ -63,16 +67,20 @@ static mut PREV_SHMEM_STARTUP: pg_sys::shmem_startup_hook_type = None;
 struct Shared {
     stmt: *mut RingHeader,
     events: *mut RingHeader,
+    plans: *mut RingHeader,
     running: *mut u8,
     rules: *mut u8,
+    seen: *mut AtomicU64,
     locks: *mut pg_sys::LWLockPadded,
 }
 
 static mut SHARED: Shared = Shared {
     stmt: ptr::null_mut(),
     events: ptr::null_mut(),
+    plans: ptr::null_mut(),
     running: ptr::null_mut(),
     rules: ptr::null_mut(),
+    seen: ptr::null_mut(),
     locks: ptr::null_mut(),
 };
 
@@ -92,8 +100,12 @@ struct Layout {
     ev_cap: usize,
     ev_payload: usize,
     ev_off: usize,
+    plan_cap: usize,
+    plan_payload: usize,
+    plan_off: usize,
     run_off: usize,
     rules_off: usize,
+    seen_off: usize,
     total: usize,
 }
 
@@ -108,10 +120,15 @@ impl Layout {
         let stmt_size = ring_size::<TraceRecord>(stmt_cap, stmt_payload);
         let ev_off = stmt_off + stmt_size;
         let ev_size = ring_size::<EventRecord>(ev_cap, ev_payload);
-        let run_off = ev_off + ev_size;
+        let plan_cap = if gucs::MAX_PLAN_LEN.get() > 0 { gucs::PLAN_BUFFER_SIZE.get() as usize } else { 1 };
+        let plan_payload = (gucs::MAX_PLAN_LEN.get() + gucs::MAX_QUERY_LEN.get()) as usize;
+        let plan_off = ev_off + ev_size;
+        let plan_size = ring_size::<PlanRecord>(plan_cap, plan_payload);
+        let run_off = plan_off + plan_size;
         let run_size = running::region_size();
         let rules_off = run_off + run_size;
-        let total = rules_off + rules::BLOCK_SIZE;
+        let seen_off = align8(rules_off + rules::BLOCK_SIZE);
+        let total = seen_off + SEEN_SLOTS * 8;
         Layout {
             stmt_cap,
             stmt_payload,
@@ -119,8 +136,12 @@ impl Layout {
             ev_cap,
             ev_payload,
             ev_off,
+            plan_cap,
+            plan_payload,
+            plan_off,
             run_off,
             rules_off,
+            seen_off,
             total,
         }
     }
@@ -186,14 +207,18 @@ unsafe extern "C-unwind" fn shmem_startup() {
             // before being written (readers are bounded by `head`).
             init_ring::<TraceRecord>(base.add(l.stmt_off), l.stmt_cap, l.stmt_payload);
             init_ring::<EventRecord>(base.add(l.ev_off), l.ev_cap, l.ev_payload);
+            init_ring::<PlanRecord>(base.add(l.plan_off), l.plan_cap, l.plan_payload);
+            ptr::write_bytes(base.add(l.seen_off), 0, SEEN_SLOTS * 8);
             running::init(base.add(l.run_off));
             rules::init(base.add(l.rules_off));
         }
         SHARED = Shared {
             stmt: base.add(l.stmt_off) as *mut RingHeader,
             events: base.add(l.ev_off) as *mut RingHeader,
+            plans: base.add(l.plan_off) as *mut RingHeader,
             running: base.add(l.run_off),
             rules: base.add(l.rules_off),
+            seen: base.add(l.seen_off) as *mut AtomicU64,
             locks: pg_sys::GetNamedLWLockTranche(SHMEM_NAME.as_ptr()),
         };
 
@@ -294,6 +319,57 @@ pub fn event_ring() -> Ring<EventRecord> {
         hdr: s.events,
         lock: LockRef(unsafe { &raw mut (*s.locks.add(LOCK_EVENTS)).lock }),
         _record: PhantomData,
+    }
+}
+
+pub fn plan_ring() -> Ring<PlanRecord> {
+    let s = shared();
+    Ring {
+        hdr: s.plans,
+        lock: LockRef(unsafe { &raw mut (*s.locks.add(LOCK_PLANS)).lock }),
+        _record: PhantomData,
+    }
+}
+
+/// Remember that the plan with this key has been stored. Returns true if it
+/// was not known before. The table is a small cache of recent keys: lookups
+/// are lock-free, a full neighbourhood evicts one of its entries, so a plan
+/// may occasionally be stored again, never missed.
+pub fn plan_seen_insert(key: u64) -> bool {
+    let table = shared().seen;
+    if table.is_null() {
+        return false;
+    }
+    let key = key.max(1);
+    let start = (key as usize) % SEEN_SLOTS;
+    unsafe {
+        for i in 0..4 {
+            let slot = &*table.add((start + i) % SEEN_SLOTS);
+            let cur = slot.load(Ordering::Relaxed);
+            if cur == key {
+                return false;
+            }
+            if cur == 0 {
+                match slot.compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => return true,
+                    Err(other) if other == key => return false,
+                    Err(_) => {}
+                }
+            }
+        }
+        (*table.add((start + (key >> 60) as usize % 4) % SEEN_SLOTS)).store(key, Ordering::Relaxed);
+    }
+    true
+}
+
+/// Forget every plan seen so far, so that plans are stored again.
+pub fn plan_seen_clear() {
+    let table = shared().seen;
+    if table.is_null() {
+        return;
+    }
+    for i in 0..SEEN_SLOTS {
+        unsafe { (*table.add(i)).store(0, Ordering::Relaxed) };
     }
 }
 

@@ -72,7 +72,7 @@ SELECT pg_profiler_rule_remove(id) FROM pg_profiler_rules();
 (1 row)
 
 SELECT count(*) FILTER (WHERE query LIKE 'SELECT 3 AS regress_ok_stmt%') AS ok_rows,
-       count(*) FILTER (WHERE query LIKE 'SELECT 1 / g AS regress_failing_stmt%' AND is_error) AS error_rows
+       count(*) FILTER (WHERE query LIKE 'SELECT 1 / g AS regress_failing_stmt%' AND sqlstate IS NOT NULL) AS error_rows
   FROM pg_profiler();
  ok_rows | error_rows 
 ---------+------------

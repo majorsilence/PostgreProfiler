@@ -65,6 +65,8 @@ pub struct TraceRecord {
     /// Monotonic sequence number, assigned by the ring on push.
     pub seq: u64,
     pub queryid: i64,
+    /// Fingerprint of the plan shape (see `plan.rs`), 0 for statements without one.
+    pub plan_id: i64,
     /// `TimestampTz` (microseconds since 2000-01-01 UTC) at statement start.
     pub start_ts: i64,
     /// Start of the enclosing transaction (`TimestampTz`).
@@ -156,6 +158,72 @@ impl RingRecord for EventRecord {
     }
 }
 
+/// Why a plan was stored (`PlanRecord::reasons` bits).
+pub mod plan_reason {
+    /// First time this (database, queryid, plan_id) was seen.
+    pub const NEW: u8 = 1;
+    /// The execution was slower than `pg_profiler.plan_outlier_ms`.
+    pub const SLOW: u8 = 2;
+    /// An estimate was off by more than `pg_profiler.plan_misestimate_ratio`.
+    pub const MISESTIMATE: u8 = 4;
+    /// The execution wrote temporary files (a sort or hash spilled).
+    pub const SPILL: u8 = 8;
+
+    pub fn names(bits: u8) -> String {
+        let mut v = Vec::new();
+        for (bit, name) in [(NEW, "new"), (SLOW, "slow"), (MISESTIMATE, "misestimate"), (SPILL, "spill")] {
+            if bits & bit != 0 {
+                v.push(name);
+            }
+        }
+        v.join(",")
+    }
+}
+
+/// A stored plan: EXPLAIN output (text or JSON) followed by the query text.
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub struct PlanRecord {
+    pub seq: u64,
+    /// `TimestampTz` when the plan was stored.
+    pub ts: i64,
+    pub queryid: i64,
+    pub plan_id: i64,
+    /// Execution time of the sampled run (0 for plans stored when first seen).
+    pub exec_time_us: f64,
+    /// Row estimate of the top plan node.
+    pub plan_rows: f64,
+    /// Largest estimate-vs-actual ratio found (0 without actuals).
+    pub max_misestimate: f64,
+    pub temp_blks_written: i64,
+    pub userid: u32,
+    pub dbid: u32,
+    pub pid: i32,
+    pub reasons: u8,
+    /// 0 = text, 1 = JSON.
+    pub format: u8,
+    /// True if the plan carries actual row counts.
+    pub analyzed: bool,
+    pub plan_len: u32,
+    pub query_len: u32,
+}
+
+impl Default for PlanRecord {
+    fn default() -> Self {
+        // SAFETY: see TraceRecord::default.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
+impl RingRecord for PlanRecord {
+    fn set_seq(&mut self, seq: u64) {
+        self.seq = seq;
+    }
+    fn payload_len(&self) -> usize {
+        self.plan_len as usize + self.query_len as usize
+    }
+}
+
 /// Bytes up to the first NUL (or all of them).
 pub fn c_bytes(buf: &[u8]) -> &[u8] {
     let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
@@ -176,7 +244,8 @@ mod tests {
     /// when they change.
     #[test]
     fn record_sizes() {
-        assert_eq!(std::mem::size_of::<TraceRecord>(), 328);
+        assert_eq!(std::mem::size_of::<TraceRecord>(), 336);
         assert_eq!(std::mem::size_of::<EventRecord>(), 160);
+        assert_eq!(std::mem::size_of::<PlanRecord>(), 88);
     }
 }

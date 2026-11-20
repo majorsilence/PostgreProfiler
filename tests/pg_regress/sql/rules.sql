@@ -17,7 +17,7 @@ SELECT 3 AS regress_ok_stmt;
 SELECT 1 / g AS regress_failing_stmt FROM generate_series(0, 0) g;
 SELECT pg_profiler_rule_remove(id) FROM pg_profiler_rules();
 SELECT count(*) FILTER (WHERE query LIKE 'SELECT 3 AS regress_ok_stmt%') AS ok_rows,
-       count(*) FILTER (WHERE query LIKE 'SELECT 1 / g AS regress_failing_stmt%' AND is_error) AS error_rows
+       count(*) FILTER (WHERE query LIKE 'SELECT 1 / g AS regress_failing_stmt%' AND sqlstate IS NOT NULL) AS error_rows
   FROM pg_profiler();
 
 -- min_duration_ms and application_name conditions
