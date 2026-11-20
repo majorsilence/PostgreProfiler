@@ -12,7 +12,7 @@ SELECT 1 AS regress_marker_basic;
                     1
 (1 row)
 
-SELECT cmd_type, toplevel, nesting, rows, is_error, sqlstate
+SELECT cmd_type, nesting = 0 AS toplevel, nesting, rows, is_error, sqlstate
   FROM pg_profiler()
  WHERE query LIKE 'SELECT 1 AS regress_marker_basic%';
  cmd_type | toplevel | nesting | rows | is_error | sqlstate 

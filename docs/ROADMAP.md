@@ -176,7 +176,7 @@ behind a go/no-go spike.
   when the cursor was lapped), `pg_profiler_running()`, `pg_profiler_events(...)`,
   `pg_profiler.runtime_stats` (persisted **and** the in-memory current interval),
   `pg_profiler.plans`, `pg_profiler.regressed_queries(...)`, `pg_profiler_version()`.
-  Roles `pg_profiler_reader` and `pg_profiler_admin` are created by the extension.
+  Roles `profiler_reader` and `profiler_admin` are created by the extension.
 
 ### 4.2 GUI
 

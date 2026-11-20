@@ -24,6 +24,13 @@ pub static SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 pub static MIN_DURATION_MS: GucSetting<f64> = GucSetting::<f64>::new(0.0);
 pub static BUFFER_SIZE: GucSetting<i32> = GucSetting::<i32>::new(10_000);
 pub static MAX_QUERY_LEN: GucSetting<i32> = GucSetting::<i32>::new(2048);
+pub static MAX_PARAM_LEN: GucSetting<i32> = GucSetting::<i32>::new(0);
+pub static CAPTURE_PARAMS: GucSetting<bool> = GucSetting::<bool>::new(false);
+pub static EVENTS_BUFFER_SIZE: GucSetting<i32> = GucSetting::<i32>::new(2000);
+pub static EVENT_DETAIL_LEN: GucSetting<i32> = GucSetting::<i32>::new(2048);
+pub static TRACK_EVENTS: GucSetting<bool> = GucSetting::<bool>::new(true);
+pub static RUNNING_QUERY_LEN: GucSetting<i32> = GucSetting::<i32>::new(1024);
+pub static TRACK_RUNNING: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 pub fn register() {
     GucRegistry::define_bool_guc(
@@ -89,5 +96,69 @@ pub fn register() {
         65_536,
         GucContext::Postmaster,
         GucFlags::UNIT_BYTE,
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.max_param_len",
+        c"Maximum bytes of bind-parameter text stored per execution.",
+        c"0 (the default) allocates no space for parameters, so they can never be captured.",
+        &MAX_PARAM_LEN,
+        0,
+        16_384,
+        GucContext::Postmaster,
+        GucFlags::UNIT_BYTE,
+    );
+    GucRegistry::define_bool_guc(
+        c"pg_profiler.capture_params",
+        c"Record bind parameter values (sensitive: may contain personal data).",
+        c"Only effective when pg_profiler.max_param_len is greater than 0.",
+        &CAPTURE_PARAMS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.events_buffer_size",
+        c"Number of events (logins, deadlocks, lock waits, ...) kept in the event ring.",
+        c"",
+        &EVENTS_BUFFER_SIZE,
+        10,
+        1_000_000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.event_detail_len",
+        c"Maximum bytes of detail text stored per event.",
+        c"",
+        &EVENT_DETAIL_LEN,
+        0,
+        16_384,
+        GucContext::Postmaster,
+        GucFlags::UNIT_BYTE,
+    );
+    GucRegistry::define_bool_guc(
+        c"pg_profiler.track_events",
+        c"Selects whether non-statement events are recorded.",
+        c"",
+        &TRACK_EVENTS,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.running_query_len",
+        c"Bytes of query text kept per backend for the running-statements view.",
+        c"",
+        &RUNNING_QUERY_LEN,
+        0,
+        16_384,
+        GucContext::Postmaster,
+        GucFlags::UNIT_BYTE,
+    );
+    GucRegistry::define_bool_guc(
+        c"pg_profiler.track_running",
+        c"Selects whether the currently running statement of each backend is published.",
+        c"",
+        &TRACK_RUNNING,
+        GucContext::Suset,
+        GucFlags::default(),
     );
 }

@@ -10,7 +10,6 @@ use super::statement_text;
 use crate::backend::{self, StartInfo};
 use crate::gucs;
 use crate::record::{cmd, TraceRecord};
-use crate::ring;
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::prelude::*;
 use std::ffi::c_char;
@@ -114,24 +113,27 @@ unsafe extern "C-unwind" fn process_utility(
             subid: pg_sys::GetCurrentSubTransactionId(),
             cpu_user_us,
             cpu_sys_us,
+            ctx: backend::capture_ctx(),
         };
         let buf0 = pg_sys::pgBufferUsage;
         let wal0 = pg_sys::pgWalUsage;
 
+        let ptext = super::param_text(params);
+        let ptext_err = ptext.clone();
         backend::enter();
         let qs_addr = query_string as usize;
         PgTryBuilder::new(AssertUnwindSafe(|| {
             chain(pstmt, query_string, read_only_tree, context, params, query_env, dest, qc)
         }))
         .catch_others(move |e| {
-            record(&info, &saved, qs_addr as *const c_char, None, Some(&e), &buf0, &wal0);
+            record(&info, &saved, qs_addr as *const c_char, None, Some(&e), &buf0, &wal0, &ptext_err);
             e.rethrow()
         })
         .finally(backend::leave)
         .execute();
 
         let rows = if qc.is_null() { 0 } else { (*qc).nprocessed };
-        record(&info, &saved, query_string, Some(rows), None, &buf0, &wal0);
+        record(&info, &saved, query_string, Some(rows), None, &buf0, &wal0, &ptext);
     }
 }
 
@@ -148,6 +150,7 @@ unsafe fn is_excluded(node: *mut pg_sys::Node) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record(
     info: &StartInfo,
     saved: &Saved,
@@ -156,9 +159,10 @@ fn record(
     err: Option<&CaughtError>,
     buf0: &pg_sys::BufferUsage,
     wal0: &pg_sys::WalUsage,
+    params: &[u8],
 ) {
     unsafe {
-        let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting);
+        let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting, &info.ctx);
         rec.queryid = saved.query_id;
         rec.cmd_type = cmd::UTILITY;
         rec.exec_time_us = (pg_sys::GetCurrentTimestamp() - info.start_ts) as f64;
@@ -179,6 +183,6 @@ fn record(
             rec.sqlstate = error_sqlstate(e);
         }
         let text = statement_text(query_string, saved.loc, saved.len);
-        ring::push(&rec, text);
+        super::emit(&rec, text, params);
     }
 }

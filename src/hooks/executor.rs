@@ -5,7 +5,6 @@
 use super::statement_text;
 use crate::backend::{self, StartInfo};
 use crate::record::{cmd, TraceRecord};
-use crate::ring;
 use pgrx::prelude::*;
 use pgrx::{pg_sys, PgMemoryContexts};
 use pgrx::pg_sys::panic::CaughtError;
@@ -85,6 +84,7 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
             subid: pg_sys::GetCurrentSubTransactionId(),
             cpu_user_us,
             cpu_sys_us,
+            ctx: backend::capture_ctx(),
         });
     }
 }
@@ -171,7 +171,7 @@ fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
     };
     unsafe {
         let plan = &*(*qd).plannedstmt;
-        let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting);
+        let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting, &info.ctx);
         rec.queryid = plan.queryId as _;
         rec.cmd_type = cmd_kind((*qd).operation);
         rec.exec_time_us = (pg_sys::GetCurrentTimestamp() - info.start_ts) as f64;
@@ -180,7 +180,8 @@ fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
         rec.sqlstate = error_sqlstate(e);
         set_cpu(&mut rec, &info);
         let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
-        ring::push(&rec, text);
+        let params = super::param_text((*qd).params);
+        super::emit(&rec, text, &params);
     }
 }
 
@@ -207,7 +208,7 @@ unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
         let tt = &*tt;
         let plan = &*(*qd).plannedstmt;
 
-        let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting);
+        let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting, &info.ctx);
         rec.queryid = plan.queryId as _;
         rec.cmd_type = cmd_kind((*qd).operation);
         rec.exec_time_us = tt.total * 1_000_000.0;
@@ -220,7 +221,8 @@ unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
         fill_usage(&mut rec, &tt.bufusage, &tt.walusage);
 
         let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
-        ring::push(&rec, text);
+        let params = super::param_text((*qd).params);
+        super::emit(&rec, text, &params);
     }
 }
 
@@ -240,6 +242,13 @@ pub fn fill_usage(rec: &mut TraceRecord, buf: &pg_sys::BufferUsage, wal: &pg_sys
     rec.local_blks_read = buf.local_blks_read;
     rec.temp_blks_read = buf.temp_blks_read;
     rec.temp_blks_written = buf.temp_blks_written;
+    // instr_time ticks are nanoseconds on supported platforms.
+    rec.blk_read_time_us =
+        (buf.shared_blk_read_time.ticks + buf.local_blk_read_time.ticks + buf.temp_blk_read_time.ticks) / 1000;
+    rec.blk_write_time_us = (buf.shared_blk_write_time.ticks
+        + buf.local_blk_write_time.ticks
+        + buf.temp_blk_write_time.ticks)
+        / 1000;
     rec.wal_records = wal.wal_records;
     rec.wal_fpi = wal.wal_fpi;
     rec.wal_bytes = wal.wal_bytes;

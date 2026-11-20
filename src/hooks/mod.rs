@@ -47,6 +47,35 @@ fn trim_statement(mut s: &[u8]) -> &[u8] {
     s
 }
 
+/// Push a statement record unless the capture rules reject it.
+pub fn emit(rec: &crate::record::TraceRecord, text: &[u8], params: &[u8]) {
+    if crate::rules::allows(rec, text) {
+        crate::ring::push_statement(rec, text, params);
+    }
+}
+
+/// Text of the bind parameters, or empty unless capture is switched on.
+///
+/// # Safety
+/// `params` must be null or a valid `ParamListInfo`.
+pub unsafe fn param_text(params: pg_sys::ParamListInfo) -> Vec<u8> {
+    let max = crate::gucs::MAX_PARAM_LEN.get();
+    if !crate::gucs::CAPTURE_PARAMS.get() || max <= 0 || params.is_null() {
+        return Vec::new();
+    }
+    unsafe {
+        if (*params).numParams <= 0 {
+            return Vec::new();
+        }
+        let s = pg_sys::BuildParamLogString(params, std::ptr::null_mut(), max);
+        if s.is_null() {
+            Vec::new()
+        } else {
+            std::ffi::CStr::from_ptr(s).to_bytes().to_vec()
+        }
+    }
+}
+
 pub fn install() {
     unsafe {
         // Make sure the core computes query ids even without pg_stat_statements.

@@ -6,7 +6,6 @@ use super::statement_text;
 use crate::backend;
 use crate::gucs::{self, TrackLevel};
 use crate::record::{cmd, TraceRecord};
-use crate::ring;
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::prelude::*;
 use std::ffi::{c_char, c_int};
@@ -64,6 +63,7 @@ unsafe extern "C-unwind" fn planner(
 
         let t0 = pg_sys::GetCurrentTimestamp();
         let (cpu_user0, cpu_sys0) = backend::cpu_now();
+        let ctx = backend::capture_ctx();
         // Statements run while planning (e.g. immutable functions evaluated
         // during constant folding) count as nested.
         backend::enter();
@@ -78,6 +78,7 @@ unsafe extern "C-unwind" fn planner(
                 qs_addr as *const c_char,
                 level,
                 (t0, cpu_user0, cpu_sys0),
+                &ctx,
                 &e,
             );
             e.rethrow()
@@ -96,11 +97,12 @@ fn record_plan_error(
     query_string: *const c_char,
     level: i32,
     (t0, cpu_user0, cpu_sys0): (i64, i64, i64),
+    ctx: &backend::Ctx,
     e: &CaughtError,
 ) {
     unsafe {
         let q = &*parse;
-        let mut rec: TraceRecord = backend::base_record(t0, level);
+        let mut rec: TraceRecord = backend::base_record(t0, level, ctx);
         rec.queryid = q.queryId as _;
         rec.cmd_type = match q.commandType {
             pg_sys::CmdType::CMD_SELECT => cmd::SELECT,
@@ -118,6 +120,6 @@ fn record_plan_error(
         rec.is_error = true;
         rec.sqlstate = error_sqlstate(e);
         let text = statement_text(query_string, q.stmt_location, q.stmt_len);
-        ring::push(&rec, text);
+        super::emit(&rec, text, &[]);
     }
 }

@@ -14,7 +14,7 @@ SELECT regress_nested();
               7
 (1 row)
 
-SELECT toplevel, nesting FROM pg_profiler()
+SELECT nesting = 0 AS toplevel, nesting FROM pg_profiler()
  WHERE query LIKE '%regress_marker_nested%' OR query LIKE 'SELECT regress_nested()%'
  ORDER BY seq;
  toplevel | nesting 
@@ -35,7 +35,7 @@ SELECT regress_nested();
               7
 (1 row)
 
-SELECT toplevel, nesting > 0 AS nested FROM pg_profiler()
+SELECT nesting = 0 AS toplevel, nesting > 0 AS nested FROM pg_profiler()
  WHERE query LIKE '%regress_marker_nested%' OR query LIKE 'SELECT regress_nested()%'
  ORDER BY seq;
  toplevel | nested 

@@ -4,6 +4,11 @@ mod backend;
 mod gucs;
 mod hooks;
 mod record;
+#[allow(dead_code)] // TODO(A4/A5): wired up in the next commits
+mod rules;
+#[allow(dead_code)]
+mod running;
+#[allow(dead_code)]
 mod ring;
 mod sql;
 

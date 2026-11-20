@@ -2,7 +2,7 @@
 //! cells are enough; nothing here is shared with other backends.
 
 use crate::gucs::{self, TrackLevel};
-use crate::record::TraceRecord;
+use crate::record::{copy_into, TraceRecord, APP_NAME_LEN, CLIENT_ADDR_LEN};
 use pgrx::pg_sys;
 use std::cell::{Cell, RefCell};
 
@@ -20,6 +20,68 @@ pub struct StartInfo {
     /// CPU time (user, system) of this process when the statement started.
     pub cpu_user_us: i64,
     pub cpu_sys_us: i64,
+    /// Session/transaction context captured when the statement started.
+    pub ctx: Ctx,
+}
+
+/// Session and transaction context of a statement, captured at its start
+/// (a `COMMIT` would otherwise report the transaction that follows it).
+#[derive(Clone, Copy)]
+pub struct Ctx {
+    pub app: [u8; APP_NAME_LEN],
+    pub xid: u32,
+    pub xact_start: i64,
+}
+
+pub fn capture_ctx() -> Ctx {
+    let mut app = [0u8; APP_NAME_LEN];
+    unsafe {
+        let name = pg_sys::application_name;
+        if !name.is_null() {
+            copy_into(&mut app, std::ffi::CStr::from_ptr(name).to_bytes());
+        }
+        Ctx {
+            app,
+            xid: pg_sys::GetTopTransactionIdIfAny().into(),
+            xact_start: pg_sys::GetCurrentTransactionStartTimestamp(),
+        }
+    }
+}
+
+thread_local! {
+    static CLIENT_ADDR: Cell<[u8; CLIENT_ADDR_LEN]> = const { Cell::new([0; CLIENT_ADDR_LEN]) };
+}
+
+/// Text form of this backend's client address ("[local]" for unix sockets),
+/// resolved once per backend.
+pub fn client_addr() -> [u8; CLIENT_ADDR_LEN] {
+    let cached = CLIENT_ADDR.with(Cell::get);
+    if cached[0] != 0 {
+        return cached;
+    }
+    let mut out = [0u8; CLIENT_ADDR_LEN];
+    unsafe {
+        let be = pg_sys::MyBEEntry;
+        if be.is_null() {
+            return out;
+        }
+        let sa = &raw const (*be).st_clientaddr.addr as *const libc::sockaddr;
+        let text = match (*sa).sa_family as i32 {
+            libc::AF_INET => {
+                let a = &*(sa as *const libc::sockaddr_in);
+                std::net::Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)).to_string()
+            }
+            libc::AF_INET6 => {
+                let a = &*(sa as *const libc::sockaddr_in6);
+                std::net::Ipv6Addr::from(a.sin6_addr.s6_addr).to_string()
+            }
+            libc::AF_UNIX => "[local]".to_string(),
+            _ => return out,
+        };
+        copy_into(&mut out, text.as_bytes());
+    }
+    CLIENT_ADDR.with(|c| c.set(out));
+    out
 }
 
 /// Cumulative (user, system) CPU time of this process in microseconds.
@@ -130,16 +192,21 @@ pub fn take_start(qd: usize) -> Option<StartInfo> {
     })
 }
 
-/// A record pre-filled with the identity fields common to every statement.
-pub fn base_record(start_ts: i64, nesting: i32) -> TraceRecord {
+/// A record pre-filled with the identity and context fields common to every
+/// statement.
+pub fn base_record(start_ts: i64, nesting: i32, ctx: &Ctx) -> TraceRecord {
     unsafe {
         TraceRecord {
             start_ts,
+            xact_start: ctx.xact_start,
+            xid: ctx.xid,
             userid: pg_sys::GetUserId().to_u32(),
             dbid: pg_sys::MyDatabaseId.to_u32(),
             pid: pg_sys::MyProcPid,
             nesting,
             toplevel: nesting == 0,
+            application_name: ctx.app,
+            client_addr: client_addr(),
             ..TraceRecord::default()
         }
     }
