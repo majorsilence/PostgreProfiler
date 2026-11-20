@@ -224,7 +224,11 @@ shipped as a Docker image and added to `docker-compose.yml`.
 Sizes are relative (S ≈ days, M ≈ 1–2 weeks, L ≈ several weeks, XL = spike plus
 build). Every phase ends with tests green on PG17 and PG18 and an overhead check.
 
-### Phase A: richer trace and live visibility  (M–L)
+### Phase A: richer trace and live visibility  (M–L) — built
+
+**Status: implemented** on PG17 and PG18 (see "Phase A as built" below for how it
+differs from this plan).
+
 1. Refactor to a generic ring; add the **events ring**.
 2. Session context fields (`application_name`, client address, role and database
    names), `xid`/`vxid`/transaction start, I/O timing. Check the record size and
@@ -240,6 +244,37 @@ build). Every phase ends with tests green on PG17 and PG18 and an overhead check
 - *Tests:* pg_test + regress for every new event; a two-session deadlock test
   (needs a second connection, so use a TAP-style script or `pgrx` multi-client
   test); overhead benchmark with `pgbench` (budget: under 3 % TPS loss at defaults).
+
+#### Phase A as built
+
+Everything in items 1–8 above exists, with these differences:
+
+- **No `ClientAuthentication_hook`.** `Port` is opaque in the pgrx bindings, so
+  the hook could not read the user or database. Auth failures come from
+  `emit_log_hook` (SQLSTATE class 28). A `login` event is written when a backend
+  runs its first statement (the earliest point where the user and database are
+  known), and `logout` from a `before_shmem_exit` callback.
+- **Capture rules** are evaluated when a record is pushed, not at statement
+  start, so they reduce ring noise but not instrumentation overhead.
+- **`pg_profiler()` lost `toplevel`, `local_blks_hit` and `local_blks_read`.**
+  pgrx table functions support at most 32 columns and the new fields needed the
+  room. `toplevel` is `nesting = 0` (added back in the views); the local-block
+  counters are still stored in the record and are exposed again when the API
+  moves to a wider return type. This is API version 1.
+- **Role names** are `profiler_reader` and `profiler_admin`: Postgres reserves
+  the `pg_` prefix. Members of `profiler_reader` see all query text.
+- **Running table** keeps only the top-level statement per backend (with a seqlock
+  so readers never block); `pg_profiler_activity` joins it with `pg_stat_activity`
+  for waits and `pg_blocking_pids`.
+- **Lock waits** need `log_lock_waits = on`; the events are matched on the English
+  message text. Verified by hand against real sessions: deadlock (full cycle with
+  both statements), lock wait/acquired with durations, cancel, terminate and auth
+  failure. Deadlocks and lock waits need two connections, so they are not in the
+  automated suite; cancel, login, rules, roles, running, `since`, parameters and
+  session context are.
+- **Overhead:** on a Docker Desktop box `pgbench -S` showed no difference beyond
+  run-to-run noise (about ±15 %), so the "under 3 %" budget is not yet verified;
+  that needs a quiet Linux host.
 
 ### Phase B: plans and diagnostics  (L)
 1. `plan_id` fingerprint on PG17 and PG18 (tests: same shape → same id,
@@ -296,8 +331,19 @@ Save traces to a table, load them back into the GUI, and a **replay** tool
 (captured text plus parameters, per-session ordering, speed factor, target
 server). Standby support (memory-only on standbys, UI-side archive).
 
+### Phase H: PostgreSQL 19 support  (M)
+PostgreSQL 19 is released. pgrx 0.20 already ships PG19 bindings, so the work is:
+add a `pg19` cargo feature, install PG19 in the toolchain image and the CI matrix,
+and adapt anything that changed in core. Things to check first: the
+`ExecutorStart` hook signature (I expect it to return a value in 19, which would
+need another `cfg` branch like `ExecutorRun` has for 17/18), `ExecutorRun`,
+`PlannedStmt.planId` (possibly filled by core in 19, which could replace our own
+plan fingerprint in phase B), the `Instrumentation`/`BufferUsage`/`WalUsage`
+layouts, and the `instr_time` representation. Do it before phase B so the plan
+code is written against all three versions.
+
 ### Suggested order
-`A → D1 (parallel with B) → C → D2 → E0 → E1/E2/E3 → G`, with F slotted in
+`A → H → D1 (parallel with B) → C → D2 → E0 → E1/E2/E3 → G`, with F slotted in
 wherever OTLP is wanted. A is the best next step: it is small, it closes most of
 the Profiler gap, and it unblocks the GUI.
 
@@ -313,9 +359,7 @@ the Profiler gap, and it unblocks the GUI.
   `pg_stat_statements` visibility rule, mask parameters unless explicitly
   enabled, and document that text is not normalised. A normalisation option
   (literal stripping) is worth adding before the archive stores text long term.
-- **Compatibility:** PG17 and PG18 stay in the CI matrix. pgrx already ships PG19
-  bindings; add a `pg19` feature once it is stable, noting that core plan-ID
-  support may change phase B.
+- **Compatibility:** PG17 and PG18 stay in the CI matrix; PG19 is phase H.
 - **Co-existence:** keep using the core `queryid` so rows join to
   `pg_stat_statements`; document running both.
 - **Packaging:** Docker images for the extension and the UI; compose demo

@@ -167,3 +167,16 @@ pub fn copy_into(dst: &mut [u8], src: &[u8]) {
     let n = src.len().min(dst.len().saturating_sub(1));
     dst[..n].copy_from_slice(&src[..n]);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The README quotes these sizes for the shared-memory estimate; update it
+    /// when they change.
+    #[test]
+    fn record_sizes() {
+        assert_eq!(std::mem::size_of::<TraceRecord>(), 328);
+        assert_eq!(std::mem::size_of::<EventRecord>(), 160);
+    }
+}
