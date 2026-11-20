@@ -176,6 +176,47 @@ extern "C-unwind"` and always chains to the previous hook or `standard_*`.
   crashes, the row counts are sensible, and `pg_profiler_info().overwritten` grows once
   the ring wraps.
 
+## As built: deviations from the design above
+
+v1 is implemented as designed, apart from these changes (all found while
+building; the text above is left as the original plan).
+
+- **Preload guard.** `_PG_init` returns early, instead of raising an `ERROR`,
+  when the library is loaded without `shared_preload_libraries` (e.g. by
+  `CREATE EXTENSION`). The SQL functions then raise
+  `pg_profiler must be loaded via shared_preload_libraries`, so the extension
+  can still be created.
+- **Planner errors.** `SELECT 1/0` is constant-folded and fails in the planner,
+  so the executor hooks never see it. The planner hook now also records error
+  rows (query text from `Query.stmt_location/stmt_len`). Errors from the
+  planner and utility commands ignore `min_duration_ms`; planner errors also
+  ignore sampling.
+- **Sampling.** The decision is made at each top-level `ExecutorStart` /
+  `ProcessUtility` entry. The planner times planning independently of it (the
+  result is matched to the plan by pointer in `ExecutorStart`; cached plans
+  report plan time 0).
+- **Query text.** Clipped with `pg_mbcliplen` (safe for every server encoding,
+  not just UTF-8) and trimmed of surrounding whitespace and `;` like
+  `pg_stat_statements`, because the parser's statement range differs between
+  PG 17 and 18.
+- **Abort cleanup.** Transaction and subtransaction abort callbacks clear the
+  per-backend start stack and nesting level, since `ExecutorEnd` never runs for
+  statements that error out.
+- **Utility.** `ProcessUtility` rows use `qc->nprocessed`; buffer/WAL usage comes
+  from diffing `pgBufferUsage`/`pgWalUsage`. Like pgss, an untracked utility
+  command (`EXECUTE`, `PREPARE`, `DEALLOCATE`, or `track_utility = off`) does
+  not increment the nesting level.
+- **SQL surface.** `pg_profiler(limit)` columns are `seq, start_time, userid,
+  dbid, pid, queryid, cmd_type, toplevel, nesting, exec_time_ms, plan_time_ms,
+  cpu_user_ms, cpu_sys_ms, rows, <buffer columns>, wal_*, is_error, sqlstate,
+  query`. `pg_profiler_slowest`/`pg_profiler_errors` look at the whole ring.
+- **Tooling.** `libc` is a direct dependency (`getrusage`). The toolchain image
+  gained `clippy` and `rustfmt`. `pg_regress` runs through
+  `scripts/regress.sh`, which adds `shared_preload_libraries` to the pgrx data
+  directory's `postgresql.conf` first (the `~/.pgrx` volume hides changes made
+  in the image). The compose `pgdata` volume is mounted at
+  `/var/lib/postgresql`, which `postgres:18` requires.
+
 ## Phase 2 (after v1): OTLP trace export
 
 Goal: ship each recorded execution as an OpenTelemetry span to an OTLP collector, without ever slowing backends.
