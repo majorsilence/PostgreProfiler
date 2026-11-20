@@ -131,7 +131,8 @@ docker compose up --build db
 psql postgres://postgres:postgres@localhost:5432/postgres
 ```
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the design and the plan for OTLP export.
+See [docs/DESIGN.md](docs/DESIGN.md) for the design and the plan for OTLP export, and
+[docs/ROADMAP.md](docs/ROADMAP.md) for the plan for Profiler parity, a Query Store and a GUI.
 
 ## License
 
