@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# All compilation and Postgres runs inside the Docker toolchain image
+# (Rust + cargo-pgrx + Postgres 17 and 18), exactly as in local development.
+jobs:
+  test:
+    name: Postgres ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [17, 18]
+    env:
+      CLIPPY_FEATURES: --no-default-features --features pg${{ matrix.pg }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build toolchain image
+        run: docker compose --profile tools build builder
+
+      # The container runs as uid 1000 ("dev"); let it write the bind mount.
+      - name: Make workspace writable for the container user
+        run: chmod -R a+rwX .
+
+      - name: Clippy
+        run: >
+          docker compose run --rm -T builder
+          cargo clippy $CLIPPY_FEATURES --all-targets -- -D warnings
+
+      - name: cargo pgrx test
+        run: docker compose run --rm -T builder cargo pgrx test pg${{ matrix.pg }}
+
+      - name: pg_regress
+        run: docker compose run --rm -T builder bash scripts/regress.sh ${{ matrix.pg }}
+
+      - name: Show regression diffs
+        if: failure()
+        run: cat tests/pg_regress/regression.diffs || true
+
+  image:
+    name: Runtime image smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the db image
+        run: docker compose up --build -d db
+      - name: Wait for Postgres and query the extension
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec -T db pg_isready -U postgres && break
+            sleep 2
+          done
+          docker compose exec -T db psql -U postgres -c "CREATE EXTENSION pg_profiler;"
+          docker compose exec -T db psql -U postgres -c "SELECT 1;"
+          docker compose exec -T db psql -U postgres -c "SELECT cmd_type, rows FROM pg_profiler_recent LIMIT 3;"
+          docker compose exec -T db psql -U postgres -c "SELECT * FROM pg_profiler_info();"
+      - name: Logs
+        if: failure()
+        run: docker compose logs db
+      - name: Stop
+        if: always()
+        run: docker compose down -v
