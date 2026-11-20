@@ -214,6 +214,9 @@ unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
         rec.plan_time_us = info.plan_us;
         rec.rows = (*(*qd).estate).es_total_processed;
         set_cpu(&mut rec, info);
+        if backend::below_min_duration(rec.exec_time_us) {
+            return;
+        }
         fill_usage(&mut rec, &tt.bufusage, &tt.walusage);
 
         let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);

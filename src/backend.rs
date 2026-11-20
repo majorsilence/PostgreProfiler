@@ -111,6 +111,12 @@ pub fn is_tracked(level: i32) -> bool {
     }
 }
 
+/// True if a successful statement is faster than `pg_profiler.min_duration_ms`
+/// and should be dropped. Errors are always recorded.
+pub fn below_min_duration(exec_us: f64) -> bool {
+    exec_us < gucs::MIN_DURATION_MS.get() * 1000.0
+}
+
 pub fn push_start(info: StartInfo) {
     STARTS.with(|s| s.borrow_mut().push(info));
 }

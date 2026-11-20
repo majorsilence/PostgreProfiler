@@ -121,3 +121,20 @@ fn pg_profiler_rows(lim: default!(i32, 1000)) -> TableIterator<
         )
     }))
 }
+
+extension_sql!(
+    r#"
+CREATE VIEW pg_profiler_recent AS
+    SELECT * FROM pg_profiler(100);
+
+CREATE VIEW pg_profiler_slowest AS
+    SELECT * FROM pg_profiler(2147483647) ORDER BY exec_time_ms DESC LIMIT 100;
+
+CREATE VIEW pg_profiler_errors AS
+    SELECT * FROM pg_profiler(2147483647) WHERE is_error;
+
+GRANT SELECT ON pg_profiler_recent, pg_profiler_slowest, pg_profiler_errors TO PUBLIC;
+"#,
+    name = "views",
+    requires = [pg_profiler_rows]
+);

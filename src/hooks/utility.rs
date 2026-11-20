@@ -162,6 +162,9 @@ fn record(
         rec.queryid = saved.query_id;
         rec.cmd_type = cmd::UTILITY;
         rec.exec_time_us = (pg_sys::GetCurrentTimestamp() - info.start_ts) as f64;
+        if err.is_none() && backend::below_min_duration(rec.exec_time_us) {
+            return;
+        }
         rec.rows = rows.unwrap_or(0);
         set_cpu(&mut rec, info);
 
