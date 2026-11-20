@@ -1,0 +1,121 @@
+-- capture rules: with rules, only matching statements are kept
+SET pg_profiler.track = 'top';
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+SELECT pg_profiler_rule_add(query_contains => 'regress_keep') > 0 AS added;
+ added 
+-------
+ t
+(1 row)
+
+SELECT 1 AS regress_keep_me;
+ regress_keep_me 
+-----------------
+               1
+(1 row)
+
+SELECT 2 AS regress_drop_me;
+ regress_drop_me 
+-----------------
+               2
+(1 row)
+
+SELECT id, application_name, min_duration_ms, query_contains, errors_only FROM pg_profiler_rules();
+ id | application_name | min_duration_ms | query_contains | errors_only 
+----+------------------+-----------------+----------------+-------------
+  1 |                  |               0 | regress_keep   | f
+(1 row)
+
+SELECT pg_profiler_rule_remove(id) FROM pg_profiler_rules();
+ pg_profiler_rule_remove 
+-------------------------
+ t
+(1 row)
+
+SELECT count(*) FILTER (WHERE query LIKE 'SELECT 1 AS regress_keep_me%') AS kept,
+       count(*) FILTER (WHERE query LIKE 'SELECT 2 AS regress_drop_me%') AS dropped
+  FROM pg_profiler();
+ kept | dropped 
+------+---------
+    1 |       0
+(1 row)
+
+-- errors_only keeps failures and nothing else
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+SELECT pg_profiler_rule_add(errors_only => true) > 0 AS added;
+ added 
+-------
+ t
+(1 row)
+
+SELECT 3 AS regress_ok_stmt;
+ regress_ok_stmt 
+-----------------
+               3
+(1 row)
+
+SELECT 1 / g AS regress_failing_stmt FROM generate_series(0, 0) g;
+ERROR:  division by zero
+SELECT pg_profiler_rule_remove(id) FROM pg_profiler_rules();
+ pg_profiler_rule_remove 
+-------------------------
+ t
+(1 row)
+
+SELECT count(*) FILTER (WHERE query LIKE 'SELECT 3 AS regress_ok_stmt%') AS ok_rows,
+       count(*) FILTER (WHERE query LIKE 'SELECT 1 / g AS regress_failing_stmt%' AND is_error) AS error_rows
+  FROM pg_profiler();
+ ok_rows | error_rows 
+---------+------------
+       0 |          1
+(1 row)
+
+-- min_duration_ms and application_name conditions
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+SET application_name = 'regress_app';
+SELECT pg_profiler_rule_add(application_name => 'regress_', min_duration_ms => 50) > 0 AS added;
+ added 
+-------
+ t
+(1 row)
+
+SELECT 4 AS regress_quick_stmt;
+ regress_quick_stmt 
+--------------------
+                  4
+(1 row)
+
+SELECT pg_sleep(0.1), 5 AS regress_slow_stmt;
+ pg_sleep | regress_slow_stmt 
+----------+-------------------
+          |                 5
+(1 row)
+
+SELECT pg_profiler_rule_remove(id) FROM pg_profiler_rules();
+ pg_profiler_rule_remove 
+-------------------------
+ t
+(1 row)
+
+SELECT count(*) FILTER (WHERE query LIKE 'SELECT 4 AS regress_quick_stmt%') AS quick,
+       count(*) FILTER (WHERE query LIKE 'SELECT pg_sleep(0.1), 5 AS regress_slow_stmt%') AS slow
+  FROM pg_profiler();
+ quick | slow 
+-------+------
+     0 |    1
+(1 row)
+

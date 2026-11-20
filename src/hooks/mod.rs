@@ -3,7 +3,7 @@
 
 use pgrx::prelude::*;
 
-mod executor;
+pub mod executor;
 mod planner;
 mod utility;
 
@@ -76,11 +76,38 @@ pub unsafe fn param_text(params: pg_sys::ParamListInfo) -> Vec<u8> {
     }
 }
 
+/// Publish the statement this backend just started running (top level only).
+pub fn publish_running(
+    queryid: i64,
+    start_ts: i64,
+    cmd_type: u8,
+    text: &[u8],
+    ctx: &crate::backend::Ctx,
+) {
+    use crate::gucs::{self, TrackLevel};
+    if !gucs::ENABLED.get() || !gucs::TRACK_RUNNING.get() || gucs::TRACK.get() == TrackLevel::None {
+        return;
+    }
+    let slot = unsafe {
+        crate::running::Slot::new(
+            pg_sys::MyProcPid,
+            pg_sys::GetUserId().to_u32(),
+            pg_sys::MyDatabaseId.to_u32(),
+            queryid,
+            start_ts,
+            ctx.xact_start,
+            cmd_type,
+        )
+    };
+    crate::running::begin(slot, text);
+}
+
 pub fn install() {
     unsafe {
         // Make sure the core computes query ids even without pg_stat_statements.
         pg_sys::EnableQueryId();
     }
+    crate::events::install();
     planner::install();
     executor::install();
     utility::install();
@@ -102,6 +129,9 @@ unsafe extern "C-unwind" fn xact_callback(
         || event == pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT
     {
         crate::backend::reset_all();
+    }
+    if event == pg_sys::XactEvent::XACT_EVENT_ABORT || event == pg_sys::XactEvent::XACT_EVENT_COMMIT {
+        crate::running::end();
     }
 }
 

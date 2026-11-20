@@ -56,9 +56,19 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
         if in_parallel_worker() || (eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY as c_int) != 0 {
             return;
         }
+        crate::events::ensure_session();
         let level = backend::nesting();
         if level == 0 {
             backend::begin_top_level();
+            let plan = &*(*qd).plannedstmt;
+            let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
+            super::publish_running(
+                plan.queryId as _,
+                pg_sys::GetCurrentTimestamp(),
+                cmd_kind((*qd).operation),
+                text,
+                &backend::capture_ctx(),
+            );
         }
         if !backend::is_tracked(level) {
             return;
@@ -188,6 +198,9 @@ fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_end(qd: *mut pg_sys::QueryDesc) {
     unsafe {
+        if backend::nesting() == 0 && !in_parallel_worker() {
+            crate::running::end();
+        }
         if let Some(info) = backend::take_start(qd as usize) {
             if !(*qd).totaltime.is_null() {
                 record_finished(qd, &info);

@@ -1,0 +1,39 @@
+-- a session is announced by a login event on its first statement
+SET pg_profiler.track = 'top';
+SELECT kind, client_addr IS NOT NULL AS has_client
+  FROM pg_profiler_events()
+ WHERE pid = pg_backend_pid() AND kind = 'login';
+ kind  | has_client 
+-------+------------
+ login | t
+(1 row)
+
+-- statement timeouts and user cancels are cancel events
+SET statement_timeout = 20;
+SELECT pg_sleep(2);
+ERROR:  canceling statement due to statement timeout
+RESET statement_timeout;
+SELECT kind, sqlstate, detail
+  FROM pg_profiler_events()
+ WHERE pid = pg_backend_pid() AND kind = 'cancel';
+  kind  | sqlstate |                    detail                    
+--------+----------+----------------------------------------------
+ cancel | 57014    | canceling statement due to statement timeout
+(1 row)
+
+-- the statement itself is an error row too
+SELECT is_error, sqlstate FROM pg_profiler() WHERE query LIKE 'SELECT pg_sleep(2)%';
+ is_error | sqlstate 
+----------+----------
+ t        | 57014
+(1 row)
+
+-- running statements: this backend shows up with its own statement
+SELECT pid = pg_backend_pid() AS own, cmd_type, query
+  FROM pg_profiler_activity WHERE pid = pg_backend_pid();
+ own | cmd_type |                          query                           
+-----+----------+----------------------------------------------------------
+ t   | select   | SELECT pid = pg_backend_pid() AS own, cmd_type, query   +
+     |          |   FROM pg_profiler_activity WHERE pid = pg_backend_pid()
+(1 row)
+

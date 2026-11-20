@@ -56,6 +56,7 @@ unsafe extern "C-unwind" fn planner(
     bound_params: pg_sys::ParamListInfo,
 ) -> *mut pg_sys::PlannedStmt {
     unsafe {
+        crate::events::ensure_session();
         let level = backend::nesting();
         if !planning_active(level) || query_string.is_null() {
             return plan_chained(parse, query_string, cursor_options, bound_params);

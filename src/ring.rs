@@ -302,7 +302,6 @@ pub struct Stats {
     pub total_written: i64,
     pub retained: i64,
     pub overwritten: i64,
-    pub payload_cap: i32,
     pub oldest_seq: i64,
     pub next_seq: i64,
 }
@@ -446,7 +445,6 @@ impl<T: RingRecord> Ring<T> {
                 total_written: (*hdr).total_written as i64,
                 retained: (head - oldest) as i64,
                 overwritten: head.saturating_sub(cap) as i64,
-                payload_cap: (*hdr).payload_cap as i32,
                 oldest_seq: oldest as i64,
                 next_seq: head as i64,
             }

@@ -54,6 +54,18 @@ unsafe fn chain(
     }
 }
 
+/// Marks this backend idle again when a top-level utility command ends,
+/// normally or by error.
+struct RunningGuard(bool);
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::running::end();
+        }
+    }
+}
+
 /// Everything we need after the call, copied out beforehand because the
 /// `PlannedStmt` may be freed or modified by the utility command.
 #[derive(Clone, Copy)]
@@ -76,10 +88,25 @@ unsafe extern "C-unwind" fn process_utility(
     qc: *mut pg_sys::QueryCompletion,
 ) {
     unsafe {
+        crate::events::ensure_session();
         let level = backend::nesting();
-        if level == 0 && pg_sys::ParallelWorkerNumber < 0 {
+        let top = level == 0 && pg_sys::ParallelWorkerNumber < 0;
+        if top {
             backend::begin_top_level();
         }
+        // Publish the running statement (even when it is not recorded).
+        let publish = top && !query_string.is_null() && !is_excluded((*pstmt).utilityStmt);
+        if publish {
+            let text = statement_text(query_string, (*pstmt).stmt_location, (*pstmt).stmt_len);
+            super::publish_running(
+                (*pstmt).queryId as _,
+                pg_sys::GetCurrentTimestamp(),
+                cmd::UTILITY,
+                text,
+                &backend::capture_ctx(),
+            );
+        }
+        let _end = RunningGuard(publish);
         let track = pg_sys::ParallelWorkerNumber < 0
             && gucs::TRACK_UTILITY.get()
             && !query_string.is_null()

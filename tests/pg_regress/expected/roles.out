@@ -1,0 +1,56 @@
+-- roles: admin functions need profiler_admin, query text needs profiler_reader
+CREATE ROLE regress_plain;
+SET pg_profiler.track = 'top';
+SELECT pg_profiler_api_version() AS api_version;
+ api_version 
+-------------
+           1
+(1 row)
+
+SELECT 1 AS regress_marker_roles;
+ regress_marker_roles 
+----------------------
+                    1
+(1 row)
+
+SET ROLE regress_plain;
+SELECT pg_profiler_reset();
+ERROR:  permission denied for function pg_profiler_reset
+SELECT pg_profiler_rule_add(query_contains => 'x');
+ERROR:  permission denied for function pg_profiler_rule_add
+SELECT count(*) AS visible FROM pg_profiler() WHERE query LIKE 'SELECT 1 AS regress_marker_roles%';
+ visible 
+---------
+       0
+(1 row)
+
+SELECT count(*) > 0 AS masked FROM pg_profiler() WHERE query = '<insufficient privilege>';
+ masked 
+--------
+ t
+(1 row)
+
+RESET ROLE;
+GRANT profiler_reader TO regress_plain;
+SET ROLE regress_plain;
+SELECT count(*) AS visible FROM pg_profiler() WHERE query LIKE 'SELECT 1 AS regress_marker_roles%';
+ visible 
+---------
+       1
+(1 row)
+
+SELECT pg_profiler_reset();
+ERROR:  permission denied for function pg_profiler_reset
+RESET ROLE;
+GRANT profiler_admin TO regress_plain;
+SET ROLE regress_plain;
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+RESET ROLE;
+REVOKE profiler_admin FROM regress_plain;
+REVOKE profiler_reader FROM regress_plain;
+DROP ROLE regress_plain;

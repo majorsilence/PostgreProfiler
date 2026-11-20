@@ -1,14 +1,12 @@
 use pgrx::prelude::*;
 
 mod backend;
+mod events;
 mod gucs;
 mod hooks;
 mod record;
-#[allow(dead_code)] // TODO(A4/A5): wired up in the next commits
 mod rules;
-#[allow(dead_code)]
 mod running;
-#[allow(dead_code)]
 mod ring;
 mod sql;
 
@@ -214,6 +212,71 @@ mod tests {
         .unwrap();
         assert_eq!(utility_rows, Some(0));
     }
+
+    #[pg_test]
+    fn test_since_cursor_reads_new_rows_oldest_first() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        let next = Spi::get_one::<i64>("SELECT next_seq FROM pg_profiler_info()").unwrap().unwrap();
+        Spi::run("SELECT 1 AS pg_profiler_marker_since_a").unwrap();
+        Spi::run("SELECT 2 AS pg_profiler_marker_since_b").unwrap();
+        let ordered = Spi::get_one::<bool>(&format!(
+            "SELECT array_agg(query ORDER BY seq) FILTER (WHERE query LIKE '%pg_profiler_marker_since%'                     AND query NOT LIKE '%pg_profiler_since%')                     = ARRAY['SELECT 1 AS pg_profiler_marker_since_a', 'SELECT 2 AS pg_profiler_marker_since_b']                FROM pg_profiler_since({}, 1000)",
+            next - 1
+        ))
+        .unwrap();
+        assert_eq!(ordered, Some(true));
+    }
+
+    #[pg_test]
+    fn test_session_and_transaction_context() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("SET application_name = 'pgp_test_app'").unwrap();
+        Spi::run("SELECT 1 AS pg_profiler_marker_ctx").unwrap();
+        let (app, client, xact_start_set) = Spi::get_three::<String, String, bool>(
+            "SELECT application_name, client_addr, xact_start IS NOT NULL FROM pg_profiler()              WHERE query LIKE 'SELECT 1 AS pg_profiler_marker_ctx%' ORDER BY seq DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(app.as_deref(), Some("pgp_test_app"));
+        assert!(client.is_some(), "client_addr should be set");
+        assert_eq!(xact_start_set, Some(true));
+    }
+
+    #[pg_test]
+    fn test_running_shows_own_statement() {
+        let n = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler_running()              WHERE pid = pg_backend_pid() AND query LIKE '%test_running_shows_own_statement%'",
+        )
+        .unwrap();
+        assert_eq!(n, Some(1));
+    }
+
+    #[pg_test]
+    fn test_bind_parameters_are_captured_when_enabled() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("SET pg_profiler.capture_params = on").unwrap();
+        Spi::run_with_args(
+            "SELECT $1::int AS pg_profiler_marker_params",
+            &[pgrx::datum::DatumWithOid::from(42i32)],
+        )
+        .unwrap();
+        let params = Spi::get_one::<String>(
+            "SELECT params FROM pg_profiler() WHERE query LIKE 'SELECT $1::int AS pg_profiler_marker_params%'              ORDER BY seq DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(params.as_deref(), Some("$1 = '42'"));
+
+        Spi::run("SET pg_profiler.capture_params = off").unwrap();
+        Spi::run_with_args(
+            "SELECT $1::int AS pg_profiler_marker_noparams",
+            &[pgrx::datum::DatumWithOid::from(7i32)],
+        )
+        .unwrap();
+        let none = Spi::get_one::<String>(
+            "SELECT params FROM pg_profiler() WHERE query LIKE 'SELECT $1::int AS pg_profiler_marker_noparams%'              ORDER BY seq DESC LIMIT 1",
+        )
+        .unwrap();
+        assert_eq!(none, None);
+    }
 }
 
 /// This module is required by `cargo pgrx test` invocations.
@@ -224,6 +287,6 @@ pub mod pg_test {
 
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["shared_preload_libraries='pg_profiler'"]
+        vec!["shared_preload_libraries='pg_profiler'", "pg_profiler.max_param_len=256"]
     }
 }
