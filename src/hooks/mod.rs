@@ -5,6 +5,7 @@ use pgrx::prelude::*;
 
 mod executor;
 mod planner;
+mod utility;
 
 /// Slice of `source` that belongs to the statement at `loc`/`len`
 /// (`PlannedStmt.stmt_location` / `stmt_len`). `-1`/`0` mean "the whole
@@ -53,6 +54,7 @@ pub fn install() {
     }
     planner::install();
     executor::install();
+    utility::install();
     unsafe {
         pg_sys::RegisterXactCallback(Some(xact_callback), std::ptr::null_mut());
         pg_sys::RegisterSubXactCallback(Some(subxact_callback), std::ptr::null_mut());

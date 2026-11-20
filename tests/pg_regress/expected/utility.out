@@ -1,0 +1,71 @@
+-- utility statements are recorded; EXECUTE/PREPARE are not double-counted
+SET pg_profiler.track = 'top';
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+CREATE TABLE regress_util (a int);
+ALTER TABLE regress_util ADD COLUMN b text;
+PREPARE regress_prep AS SELECT 1 AS regress_marker_prep;
+EXECUTE regress_prep;
+ regress_marker_prep 
+---------------------
+                   1
+(1 row)
+
+EXECUTE regress_prep;
+ regress_marker_prep 
+---------------------
+                   1
+(1 row)
+
+DEALLOCATE regress_prep;
+DROP TABLE regress_util;
+SELECT cmd_type, rows, is_error, query
+  FROM pg_profiler()
+ WHERE query LIKE '%regress_util%' OR query LIKE '%regress_prep%' OR query LIKE '%regress_marker_prep%'
+ ORDER BY seq;
+ cmd_type | rows | is_error |                          query                          
+----------+------+----------+---------------------------------------------------------
+ utility  |    0 | f        | CREATE TABLE regress_util (a int)
+ utility  |    0 | f        | ALTER TABLE regress_util ADD COLUMN b text
+ select   |    1 | f        | PREPARE regress_prep AS SELECT 1 AS regress_marker_prep
+ select   |    1 | f        | PREPARE regress_prep AS SELECT 1 AS regress_marker_prep
+ utility  |    0 | f        | DROP TABLE regress_util
+(5 rows)
+
+-- with track_utility off, DDL is not recorded
+SET pg_profiler.track_utility = off;
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+CREATE TABLE regress_util2 (a int);
+DROP TABLE regress_util2;
+SELECT count(*) FROM pg_profiler() WHERE query LIKE '%regress_util2%';
+ count 
+-------
+     0
+(1 row)
+
+-- a failing utility statement is recorded with its SQLSTATE
+SET pg_profiler.track_utility = on;
+SELECT pg_profiler_reset();
+ pg_profiler_reset 
+-------------------
+ 
+(1 row)
+
+DROP TABLE regress_does_not_exist;
+ERROR:  table "regress_does_not_exist" does not exist
+SELECT cmd_type, is_error, sqlstate FROM pg_profiler()
+ WHERE query LIKE 'DROP TABLE regress_does_not_exist%';
+ cmd_type | is_error | sqlstate 
+----------+----------+----------
+ utility  | t        | 42P01
+(1 row)
+

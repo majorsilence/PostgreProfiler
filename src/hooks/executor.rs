@@ -78,7 +78,7 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
 
         let (cpu_user_us, cpu_sys_us) = backend::cpu_now();
         backend::push_start(StartInfo {
-            qd,
+            qd: qd as usize,
             start_ts: pg_sys::GetCurrentTimestamp(),
             plan_us: backend::take_plan_time((*qd).plannedstmt),
             nesting: level,
@@ -166,7 +166,7 @@ pub fn error_sqlstate(e: &CaughtError) -> [u8; 5] {
 
 /// Emit the error record for a tracked statement that failed.
 fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
-    let Some(info) = backend::take_start(qd) else {
+    let Some(info) = backend::take_start(qd as usize) else {
         return;
     };
     unsafe {
@@ -187,7 +187,7 @@ fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_end(qd: *mut pg_sys::QueryDesc) {
     unsafe {
-        if let Some(info) = backend::take_start(qd) {
+        if let Some(info) = backend::take_start(qd as usize) {
             if !(*qd).totaltime.is_null() {
                 record_finished(qd, &info);
             }

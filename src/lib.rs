@@ -186,6 +186,29 @@ mod tests {
         assert!(masked.unwrap() >= 1);
         Spi::run("RESET ROLE").unwrap();
     }
+
+    #[pg_test]
+    fn test_utility_statements_recorded_execute_not_doubled() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("CREATE TABLE pg_profiler_t7 (a int)").unwrap();
+        Spi::run("ALTER TABLE pg_profiler_t7 ADD COLUMN b int").unwrap();
+        for stmt in ["CREATE TABLE pg_profiler_t7%", "ALTER TABLE pg_profiler_t7%"] {
+            let kind = Spi::get_one::<String>(&format!(
+                "SELECT cmd_type FROM pg_profiler() WHERE query LIKE '{stmt}'"
+            ))
+            .unwrap();
+            assert_eq!(kind.as_deref(), Some("utility"), "{stmt}");
+        }
+
+        Spi::run("PREPARE pg_profiler_p AS SELECT 1 AS pg_profiler_marker_prep").unwrap();
+        Spi::run("EXECUTE pg_profiler_p").unwrap();
+        assert_eq!(count_marker("pg_profiler_marker_prep"), 1);
+        let utility_rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_profiler() WHERE query LIKE 'EXECUTE pg_profiler_p%'",
+        )
+        .unwrap();
+        assert_eq!(utility_rows, Some(0));
+    }
 }
 
 /// This module is required by `cargo pgrx test` invocations.

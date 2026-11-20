@@ -10,8 +10,9 @@ use std::cell::{Cell, RefCell};
 /// `ExecutorEnd` (or an error).
 #[derive(Clone, Copy)]
 pub struct StartInfo {
-    /// Identity of the `QueryDesc`; only compared, never dereferenced.
-    pub qd: *mut pg_sys::QueryDesc,
+    /// Address of the `QueryDesc` (0 for utility statements); only compared,
+    /// never dereferenced.
+    pub qd: usize,
     pub start_ts: i64,
     pub plan_us: f64,
     pub nesting: i32,
@@ -115,7 +116,7 @@ pub fn push_start(info: StartInfo) {
 }
 
 /// Remove and return the start info for `qd`, if it was tracked.
-pub fn take_start(qd: *mut pg_sys::QueryDesc) -> Option<StartInfo> {
+pub fn take_start(qd: usize) -> Option<StartInfo> {
     STARTS.with(|s| {
         let mut v = s.borrow_mut();
         let pos = v.iter().rposition(|i| i.qd == qd)?;
