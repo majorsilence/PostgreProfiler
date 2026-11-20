@@ -3,7 +3,7 @@ name = "pg_profiler"
 version = "0.1.0"
 edition = "2021"
 description = "Per-execution query tracing for PostgreSQL"
-license = "MIT OR BSD-3-Clause OR Apache-2.0"
+license = "MIT OR BSD-3-Clause OR Apache-2.0 OR PostgreSQL"
 repository = "https://github.com/majorsilence/PostgreProfiler"
 
 [lib]
