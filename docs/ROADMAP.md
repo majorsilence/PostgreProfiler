@@ -51,8 +51,8 @@ Queries.
   + collector), `powa-web` (UI), optional `powa-collector` for remote hosts,
   PostgreSQL licence. It builds on `pg_stat_statements`, so it has no
   per-execution events and no plan store.
-- PG18 `PlannedStmt` already has a `planId` field, but PG17 does not, and core
-  does not fill it, so we compute our own plan fingerprint on both.
+- PG18 and PG19 `PlannedStmt` have a `planId` field, but PG17 does not, and core
+  does not fill it (checked on 19 too), so we compute our own plan fingerprint everywhere.
 
 **Hooks and APIs checked in the pgrx 0.20 bindings (PG17 and PG18):**
 `emit_log_hook`, `ExplainOneQuery_hook`, `set_rel_pathlist_hook`,
@@ -222,7 +222,7 @@ shipped as a Docker image and added to `docker-compose.yml`.
 ## 5. Phases
 
 Sizes are relative (S ≈ days, M ≈ 1–2 weeks, L ≈ several weeks, XL = spike plus
-build). Every phase ends with tests green on PG17 and PG18 and an overhead check.
+build). Every phase ends with tests green on PG17, PG18 and PG19 and an overhead check.
 
 ### Phase A: richer trace and live visibility  (M–L) — built
 
@@ -331,21 +331,42 @@ Save traces to a table, load them back into the GUI, and a **replay** tool
 (captured text plus parameters, per-session ordering, speed factor, target
 server). Standby support (memory-only on standbys, UI-side archive).
 
-### Phase H: PostgreSQL 19 support  (M)
-PostgreSQL 19 is released. pgrx 0.20 already ships PG19 bindings, so the work is:
-add a `pg19` cargo feature, install PG19 in the toolchain image and the CI matrix,
-and adapt anything that changed in core. Things to check first: the
-`ExecutorStart` hook signature (I expect it to return a value in 19, which would
-need another `cfg` branch like `ExecutorRun` has for 17/18), `ExecutorRun`,
-`PlannedStmt.planId` (possibly filled by core in 19, which could replace our own
-plan fingerprint in phase B), the `Instrumentation`/`BufferUsage`/`WalUsage`
-layouts, and the `instr_time` representation. Do it before phase B so the plan
-code is written against all three versions.
+### Phase H: PostgreSQL 19 support  (M) — built
+
+**Status: implemented.** `pg19` is a cargo feature, PG 19 is in the toolchain image,
+the CI matrix and the runtime image (`PG_MAJOR=19 docker compose up --build db`).
+Tests, clippy and pg_regress are green on 17, 18 and 19. What changed in core, and
+what we did about it:
+
+- **Planner hook** takes an extra `ExplainState *` argument (null outside EXPLAIN).
+  Handled with a `cfg` pair around a shared implementation.
+- **Query instrumentation was reworked.** `QueryDesc::totaltime` is gone. Core now
+  allocates `QueryDesc::query_instr` in `ExecutorStart` from
+  `query_instr_options` and starts/stops it around `ExecutorRun`/`ExecutorFinish`.
+  We OR `INSTRUMENT_ALL` into `query_instr_options` *before* chaining, which means
+  the sampling decision (`begin_top_level`) now happens before the chain on every
+  version. `InstrAlloc` lost two arguments and `Instrumentation::total` is an
+  `instr_time`, not seconds. `InstrEndLoop` is only for plan nodes now.
+- **`instr_time` ticks are no longer nanoseconds on PG 19.** Timing may use the
+  CPU's TSC, and `INSTR_TIME_GET_NANOSEC` converts through `pg_ticks_to_ns`. Taking
+  the ticks as nanoseconds showed a 200 ms sleep as 720 ms. We convert with
+  `pg_sys::pg_ticks_to_ns` (execution time and block I/O times), and a test now
+  checks that `pg_sleep(0.2)` records about 200 ms. **Any later code that reads an
+  `instr_time` must go through `ticks_us`.**
+- `ExecutorRun` keeps the PG 18 signature (no `execute_once`).
+- `emit_log_hook`, the xact callbacks, `BuildParamLogString`, the `ProcessUtility`
+  hook, shared-memory requests and the `BufferUsage`/`WalUsage` fields we read are
+  unchanged. `BufferUsage` now splits I/O time into shared/local/temp, which PG 18
+  already did.
+- Core still does **not** compute `planId` on 19, so phase B's own plan fingerprint
+  stays.
+- For local development: the pgrx config sits in the `pgrx-data` volume, so an
+  existing volume needs `cargo pgrx init --pg19 ...` once (README).
 
 ### Suggested order
 `A → H → D1 (parallel with B) → C → D2 → E0 → E1/E2/E3 → G`, with F slotted in
-wherever OTLP is wanted. A is the best next step: it is small, it closes most of
-the Profiler gap, and it unblocks the GUI.
+wherever OTLP is wanted. A and H are done; D1 (the GUI skeleton) and B (plans and
+diagnostics) are next.
 
 ## 6. Cross-cutting concerns
 
@@ -359,7 +380,7 @@ the Profiler gap, and it unblocks the GUI.
   `pg_stat_statements` visibility rule, mask parameters unless explicitly
   enabled, and document that text is not normalised. A normalisation option
   (literal stripping) is worth adding before the archive stores text long term.
-- **Compatibility:** PG17 and PG18 stay in the CI matrix; PG19 is phase H.
+- **Compatibility:** PG17, PG18 and PG19 are all in the CI matrix (phase H is done).
 - **Co-existence:** keep using the core `queryid` so rows join to
   `pg_stat_statements`; document running both.
 - **Packaging:** Docker images for the extension and the UI; compose demo

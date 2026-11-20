@@ -11,7 +11,7 @@ and read back with plain SQL.
 individual executions, which is what you need to investigate one slow run or one
 error.
 
-Supports PostgreSQL 17 and 18.
+Supports PostgreSQL 17, 18 and 19.
 
 ## Installation
 
@@ -191,6 +191,7 @@ locally besides Docker.
 docker compose run --rm builder cargo clippy --features pg18 -- -D warnings
 docker compose run --rm builder cargo pgrx test pg18
 docker compose run --rm builder cargo pgrx test pg17
+docker compose run --rm builder cargo pgrx test pg19
 
 # Top-level behaviour tests (tests/pg_regress), with the library preloaded
 docker compose run --rm builder bash scripts/regress.sh 18
@@ -198,7 +199,14 @@ docker compose run --rm builder bash scripts/regress.sh 18
 # Build the extension into a Postgres image and run it
 docker compose up --build db
 psql postgres://postgres:postgres@localhost:5432/postgres
+
+# The same for another major version (17, 18 or 19)
+PG_MAJOR=19 docker compose up --build db
 ```
+
+The builder's pgrx configuration lives in a volume. If you created it before
+PG19 was added, register the new server once with
+`docker compose run --rm builder cargo pgrx init --pg19 /usr/lib/postgresql/19/bin/pg_config`.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the design and the plan for OTLP export, and
 [docs/ROADMAP.md](docs/ROADMAP.md) for the plan for Profiler parity, a Query Store and a GUI.

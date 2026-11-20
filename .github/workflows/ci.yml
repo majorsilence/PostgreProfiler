@@ -6,7 +6,7 @@ on:
   pull_request:
 
 # All compilation and Postgres runs inside the Docker toolchain image
-# (Rust + cargo-pgrx + Postgres 17 and 18), exactly as in local development.
+# (Rust + cargo-pgrx + Postgres 17, 18 and 19), exactly as in local development.
 jobs:
   test:
     name: Postgres ${{ matrix.pg }}
@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [17, 18]
+        pg: [17, 18, 19]
     env:
       CLIPPY_FEATURES: --no-default-features --features pg${{ matrix.pg }}
     steps:
@@ -43,8 +43,14 @@ jobs:
         run: cat tests/pg_regress/regression.diffs || true
 
   image:
-    name: Runtime image smoke test
+    name: Runtime image PG${{ matrix.pg }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [17, 18, 19]
+    env:
+      PG_MAJOR: ${{ matrix.pg }}
     steps:
       - uses: actions/checkout@v4
       - name: Build and start the db image

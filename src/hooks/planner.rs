@@ -22,16 +22,32 @@ pub fn install() {
     }
 }
 
+// PG 19 passes the EXPLAIN state (null outside EXPLAIN) to the planner.
+#[cfg(feature = "pg19")]
+type Explain = *mut pg_sys::ExplainState;
+#[cfg(not(feature = "pg19"))]
+type Explain = ();
+
 unsafe fn plan_chained(
     parse: *mut pg_sys::Query,
     query_string: *const c_char,
     cursor_options: c_int,
     bound_params: pg_sys::ParamListInfo,
+    explain: Explain,
 ) -> *mut pg_sys::PlannedStmt {
     unsafe {
+        #[cfg(feature = "pg19")]
         match PREV_PLANNER {
-            Some(prev) => prev(parse, query_string, cursor_options, bound_params),
-            None => pg_sys::standard_planner(parse, query_string, cursor_options, bound_params),
+            Some(prev) => prev(parse, query_string, cursor_options, bound_params, explain),
+            None => pg_sys::standard_planner(parse, query_string, cursor_options, bound_params, explain),
+        }
+        #[cfg(not(feature = "pg19"))]
+        {
+            let () = explain;
+            match PREV_PLANNER {
+                Some(prev) => prev(parse, query_string, cursor_options, bound_params),
+                None => pg_sys::standard_planner(parse, query_string, cursor_options, bound_params),
+            }
         }
     }
 }
@@ -48,6 +64,19 @@ fn planning_active(level: i32) -> bool {
     }
 }
 
+#[cfg(feature = "pg19")]
+#[pg_guard]
+unsafe extern "C-unwind" fn planner(
+    parse: *mut pg_sys::Query,
+    query_string: *const c_char,
+    cursor_options: c_int,
+    bound_params: pg_sys::ParamListInfo,
+    explain: *mut pg_sys::ExplainState,
+) -> *mut pg_sys::PlannedStmt {
+    unsafe { planner_impl(parse, query_string, cursor_options, bound_params, explain) }
+}
+
+#[cfg(not(feature = "pg19"))]
 #[pg_guard]
 unsafe extern "C-unwind" fn planner(
     parse: *mut pg_sys::Query,
@@ -55,11 +84,21 @@ unsafe extern "C-unwind" fn planner(
     cursor_options: c_int,
     bound_params: pg_sys::ParamListInfo,
 ) -> *mut pg_sys::PlannedStmt {
+    unsafe { planner_impl(parse, query_string, cursor_options, bound_params, ()) }
+}
+
+unsafe fn planner_impl(
+    parse: *mut pg_sys::Query,
+    query_string: *const c_char,
+    cursor_options: c_int,
+    bound_params: pg_sys::ParamListInfo,
+    explain: Explain,
+) -> *mut pg_sys::PlannedStmt {
     unsafe {
         crate::events::ensure_session();
         let level = backend::nesting();
         if !planning_active(level) || query_string.is_null() {
-            return plan_chained(parse, query_string, cursor_options, bound_params);
+            return plan_chained(parse, query_string, cursor_options, bound_params, explain);
         }
 
         let t0 = pg_sys::GetCurrentTimestamp();
@@ -71,7 +110,7 @@ unsafe extern "C-unwind" fn planner(
         let parse_addr = parse as usize;
         let qs_addr = query_string as usize;
         let result = PgTryBuilder::new(AssertUnwindSafe(|| {
-            plan_chained(parse, query_string, cursor_options, bound_params)
+            plan_chained(parse, query_string, cursor_options, bound_params, explain)
         }))
         .catch_others(move |e| {
             record_plan_error(

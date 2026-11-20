@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 #
 # Stages:
-#   toolchain - Rust + cargo-pgrx + Postgres 17 and 18 server/dev packages.
+#   toolchain - Rust + cargo-pgrx + Postgres 17, 18 and 19 server/dev packages.
 #               No source; used by the compose "builder" service with the repo
 #               bind-mounted for compile/lint/test.
 #   build     - compiles and packages the extension for PG_MAJOR.
@@ -28,6 +28,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       postgresql-17 postgresql-server-dev-17 \
       postgresql-18 postgresql-server-dev-18 \
+      postgresql-19 postgresql-server-dev-19 \
  && rm -rf /var/lib/apt/lists/*
 
 # Postgres refuses to run as root, and `cargo pgrx test/run` starts it, so
@@ -37,7 +38,7 @@ RUN rustup component add clippy rustfmt
 
 RUN useradd --create-home --uid 1000 dev \
  && install -d -o dev -g dev /src /src/target \
- && for v in 17 18; do \
+ && for v in 17 18 19; do \
       chown -R dev:dev /usr/lib/postgresql/$v/lib /usr/share/postgresql/$v/extension; \
     done
 USER dev
@@ -49,7 +50,8 @@ WORKDIR /src
 RUN cargo install --locked cargo-pgrx --version ${PGRX_VERSION} \
  && cargo pgrx init \
       --pg17 /usr/lib/postgresql/17/bin/pg_config \
-      --pg18 /usr/lib/postgresql/18/bin/pg_config
+      --pg18 /usr/lib/postgresql/18/bin/pg_config \
+      --pg19 /usr/lib/postgresql/19/bin/pg_config
 
 FROM toolchain AS build
 ARG PG_MAJOR

@@ -202,6 +202,9 @@ building; the text above is left as the original plan).
 - **Abort cleanup.** Transaction and subtransaction abort callbacks clear the
   per-backend start stack and nesting level, since `ExecutorEnd` never runs for
   statements that error out.
+- **PostgreSQL 19.** Added after v1 as a third supported version (`pg19` feature).
+  PG 19 changes the planner hook signature and the query instrumentation API and
+  counts `instr_time` in CPU ticks; see "Phase H" in [ROADMAP.md](ROADMAP.md).
 - **Utility.** `ProcessUtility` rows use `qc->nprocessed`; buffer/WAL usage comes
   from diffing `pgBufferUsage`/`pgWalUsage`. Like pgss, an untracked utility
   command (`EXECUTE`, `PREPARE`, `DEALLOCATE`, or `track_utility = off`) does

@@ -16,12 +16,15 @@ services:
     profiles: ["tools"]
 
   # Postgres with the compiled extension installed and preloaded.
-  #   docker compose up --build db
+  #   docker compose up --build db            (PostgreSQL 18)
+  #   PG_MAJOR=19 docker compose up --build db  (17, 18 or 19)
   #   psql postgres://postgres:postgres@localhost:5432/postgres
   db:
     build:
       context: .
       target: postgres
+      args:
+        PG_MAJOR: ${PG_MAJOR:-18}
     environment:
       POSTGRES_PASSWORD: postgres   # local development only
     ports:

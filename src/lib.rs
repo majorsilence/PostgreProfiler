@@ -69,6 +69,21 @@ mod tests {
         assert_eq!(err, Some(false));
     }
 
+    /// Guards the time units: PG 19 counts `instr_time` in CPU ticks, which
+    /// once made a 200 ms sleep show up as 700 ms.
+    #[pg_test]
+    fn test_exec_time_is_wall_clock_milliseconds() {
+        Spi::run("SET pg_profiler.track = 'all'").unwrap();
+        Spi::run("SELECT pg_profiler_reset()").unwrap();
+        Spi::run("SELECT pg_sleep(0.2) /* pg_profiler_marker_time */").unwrap();
+        let ms = Spi::get_one::<f64>(
+            "SELECT exec_time_ms FROM pg_profiler() WHERE query LIKE '%pg_profiler_marker_time%' AND query NOT LIKE '%pg_profiler()%'",
+        )
+        .unwrap()
+        .unwrap();
+        assert!((195.0..400.0).contains(&ms), "exec_time_ms = {ms}");
+    }
+
     #[pg_test]
     fn test_reset_hides_rows() {
         Spi::run("SET pg_profiler.track = 'all'").unwrap();

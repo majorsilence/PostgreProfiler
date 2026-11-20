@@ -6,7 +6,9 @@ use super::statement_text;
 use crate::backend::{self, StartInfo};
 use crate::record::{cmd, TraceRecord};
 use pgrx::prelude::*;
-use pgrx::{pg_sys, PgMemoryContexts};
+use pgrx::pg_sys;
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+use pgrx::PgMemoryContexts;
 use pgrx::pg_sys::panic::CaughtError;
 use std::ffi::c_int;
 use std::panic::AssertUnwindSafe;
@@ -48,18 +50,28 @@ fn cmd_kind(op: pg_sys::CmdType::Type) -> u8 {
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c_int) {
     unsafe {
+        let skip = in_parallel_worker() || (eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY as c_int) != 0;
+        let level = backend::nesting();
+        // The sampling decision comes first: PG 19 allocates the query
+        // instrumentation inside ExecutorStart from `query_instr_options`.
+        if !skip && level == 0 {
+            backend::begin_top_level();
+        }
+        #[cfg(feature = "pg19")]
+        if !skip && backend::is_tracked(level) {
+            (*qd).query_instr_options |= pg_sys::InstrumentOption::INSTRUMENT_ALL as c_int;
+        }
+
         match PREV_START {
             Some(prev) => prev(qd, eflags),
             None => pg_sys::standard_ExecutorStart(qd, eflags),
         }
 
-        if in_parallel_worker() || (eflags & pg_sys::EXEC_FLAG_EXPLAIN_ONLY as c_int) != 0 {
+        if skip {
             return;
         }
         crate::events::ensure_session();
-        let level = backend::nesting();
         if level == 0 {
-            backend::begin_top_level();
             let plan = &*(*qd).plannedstmt;
             let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
             super::publish_running(
@@ -76,7 +88,9 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
 
         // Allocate in the per-query context (after the chain, so that the
         // executor state exists) so the instrumentation goes away at
-        // ExecutorEnd. This is the pg_stat_statements pattern.
+        // ExecutorEnd. This is the pg_stat_statements pattern. PG 19 does
+        // the allocation itself (see above).
+        #[cfg(any(feature = "pg17", feature = "pg18"))]
         if (*qd).totaltime.is_null() {
             let cxt = (*(*qd).estate).es_query_cxt;
             PgMemoryContexts::For(cxt).switch_to(|_| {
@@ -100,6 +114,7 @@ unsafe extern "C-unwind" fn executor_start(qd: *mut pg_sys::QueryDesc, eflags: c
 }
 
 // ExecutorRun gained `execute_once` in PG 17 and lost it again in PG 18.
+// QueryDesc::totaltime became `query_instr` (allocated by core) in PG 19.
 #[cfg(feature = "pg17")]
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_run(
@@ -116,7 +131,7 @@ unsafe extern "C-unwind" fn executor_run(
     }
 }
 
-#[cfg(feature = "pg18")]
+#[cfg(any(feature = "pg18", feature = "pg19"))]
 #[pg_guard]
 unsafe extern "C-unwind" fn executor_run(
     qd: *mut pg_sys::QueryDesc,
@@ -202,7 +217,7 @@ unsafe extern "C-unwind" fn executor_end(qd: *mut pg_sys::QueryDesc) {
             crate::running::end();
         }
         if let Some(info) = backend::take_start(qd as usize) {
-            if !(*qd).totaltime.is_null() {
+            if !query_instr(qd).is_null() {
                 record_finished(qd, &info);
             }
         }
@@ -213,18 +228,56 @@ unsafe extern "C-unwind" fn executor_end(qd: *mut pg_sys::QueryDesc) {
     }
 }
 
+/// The query-level instrumentation of `qd`, null if there is none.
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+unsafe fn query_instr(qd: *mut pg_sys::QueryDesc) -> *mut pg_sys::Instrumentation {
+    unsafe { (*qd).totaltime }
+}
+
+#[cfg(feature = "pg19")]
+unsafe fn query_instr(qd: *mut pg_sys::QueryDesc) -> *mut pg_sys::Instrumentation {
+    unsafe { (*qd).query_instr }
+}
+
+/// Elapsed execution time of the instrumented query in microseconds.
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+unsafe fn total_us(tt: *mut pg_sys::Instrumentation) -> f64 {
+    unsafe {
+        pg_sys::InstrEndLoop(tt);
+        (*tt).total * 1_000_000.0
+    }
+}
+
+/// PG 19 keeps `total` as an `instr_time` (nanosecond ticks).
+#[cfg(feature = "pg19")]
+unsafe fn total_us(tt: *mut pg_sys::Instrumentation) -> f64 {
+    unsafe { ticks_us((*tt).total) as f64 }
+}
+
+/// Microseconds in an `instr_time`. Up to PG 18 the ticks are nanoseconds; PG 19
+/// may count raw CPU cycles (TSC), so convert the way `INSTR_TIME_GET_NANOSEC` does.
+#[cfg(any(feature = "pg17", feature = "pg18"))]
+fn ticks_us(t: pg_sys::instr_time) -> i64 {
+    t.ticks / 1000
+}
+
+#[cfg(feature = "pg19")]
+fn ticks_us(t: pg_sys::instr_time) -> i64 {
+    unsafe { pg_sys::pg_ticks_to_ns(t.ticks) / 1000 }
+}
+
 /// Build and push the record for a statement that completed normally.
 unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
     unsafe {
-        let tt = (*qd).totaltime;
-        pg_sys::InstrEndLoop(tt);
-        let tt = &*tt;
+        let tt_ptr = query_instr(qd);
+        let exec_us = total_us(tt_ptr);
+        let tt = &*tt_ptr;
         let plan = &*(*qd).plannedstmt;
 
         let mut rec: TraceRecord = backend::base_record(info.start_ts, info.nesting, &info.ctx);
         rec.queryid = plan.queryId as _;
         rec.cmd_type = cmd_kind((*qd).operation);
-        rec.exec_time_us = tt.total * 1_000_000.0;
+        rec.exec_time_us = exec_us;
         rec.plan_time_us = info.plan_us;
         rec.rows = (*(*qd).estate).es_total_processed;
         set_cpu(&mut rec, info);
@@ -255,13 +308,11 @@ pub fn fill_usage(rec: &mut TraceRecord, buf: &pg_sys::BufferUsage, wal: &pg_sys
     rec.local_blks_read = buf.local_blks_read;
     rec.temp_blks_read = buf.temp_blks_read;
     rec.temp_blks_written = buf.temp_blks_written;
-    // instr_time ticks are nanoseconds on supported platforms.
     rec.blk_read_time_us =
-        (buf.shared_blk_read_time.ticks + buf.local_blk_read_time.ticks + buf.temp_blk_read_time.ticks) / 1000;
-    rec.blk_write_time_us = (buf.shared_blk_write_time.ticks
-        + buf.local_blk_write_time.ticks
-        + buf.temp_blk_write_time.ticks)
-        / 1000;
+        ticks_us(buf.shared_blk_read_time) + ticks_us(buf.local_blk_read_time) + ticks_us(buf.temp_blk_read_time);
+    rec.blk_write_time_us = ticks_us(buf.shared_blk_write_time)
+        + ticks_us(buf.local_blk_write_time)
+        + ticks_us(buf.temp_blk_write_time);
     rec.wal_records = wal.wal_records;
     rec.wal_fpi = wal.wal_fpi;
     rec.wal_bytes = wal.wal_bytes;
