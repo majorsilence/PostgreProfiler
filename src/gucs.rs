@@ -17,6 +17,19 @@ pub enum TrackLevel {
     All,
 }
 
+/// Which statements get aggregated statistics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PostgresGucEnum)]
+pub enum StatsCapture {
+    /// Every tracked statement.
+    #[name = c"all"]
+    All,
+    /// Only queries that have had a run of at least `stats_auto_min_ms`, or an error.
+    #[name = c"auto"]
+    Auto,
+    #[name = c"none"]
+    None,
+}
+
 /// Format of captured plans.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PostgresGucEnum)]
 pub enum PlanFormat {
@@ -47,6 +60,13 @@ pub static MAX_PLAN_LEN: GucSetting<i32> = GucSetting::<i32>::new(8192);
 pub static PLAN_SAMPLE_RATE: GucSetting<f64> = GucSetting::<f64>::new(0.0);
 pub static PLAN_OUTLIER_MS: GucSetting<f64> = GucSetting::<f64>::new(1000.0);
 pub static PLAN_MISESTIMATE_RATIO: GucSetting<f64> = GucSetting::<f64>::new(100.0);
+
+pub static STATS_CAPTURE: GucSetting<StatsCapture> = GucSetting::<StatsCapture>::new(StatsCapture::All);
+pub static STATS_AUTO_MIN_MS: GucSetting<f64> = GucSetting::<f64>::new(1.0);
+pub static STATS_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(300);
+pub static STATS_ENTRIES: GucSetting<i32> = GucSetting::<i32>::new(5000);
+pub static STATS_TEXT_LEN: GucSetting<i32> = GucSetting::<i32>::new(1024);
+pub static ARCHIVE: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 pub fn register() {
     GucRegistry::define_bool_guc(
@@ -243,4 +263,61 @@ pub fn register() {
         GucContext::Suset,
         GucFlags::default(),
     );
+    GucRegistry::define_enum_guc(
+        c"pg_profiler.stats_capture",
+        c"Which statements are aggregated into per-interval statistics.",
+        c"all: every tracked statement, auto: only queries with a run of at least stats_auto_min_ms, none: off.",
+        &STATS_CAPTURE,
+        GucContext::Suset,
+        GucFlags::default(),
+    );
+    GucRegistry::define_float_guc(
+        c"pg_profiler.stats_auto_min_ms",
+        c"In auto capture mode, the run time that makes a query worth tracking.",
+        c"",
+        &STATS_AUTO_MIN_MS,
+        0.0,
+        f64::from(i32::MAX),
+        GucContext::Suset,
+        GucFlags::UNIT_MS,
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.stats_interval",
+        c"Length of one statistics interval, in seconds.",
+        c"Should divide a day evenly so that intervals line up with the clock.",
+        &STATS_INTERVAL,
+        5,
+        86_400,
+        GucContext::Postmaster,
+        GucFlags::UNIT_S,
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.stats_entries",
+        c"Distinct (database, role, query, plan) entries kept per statistics interval.",
+        c"Memory is allocated for four intervals of this many entries (about 500 bytes each) plus one query text per entry.",
+        &STATS_ENTRIES,
+        100,
+        1_000_000,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.stats_text_len",
+        c"Bytes of query text kept per query for the statistics.",
+        c"",
+        &STATS_TEXT_LEN,
+        0,
+        65_536,
+        GucContext::Postmaster,
+        GucFlags::UNIT_BYTE,
+    );
+    GucRegistry::define_bool_guc(
+        c"pg_profiler.archive",
+        c"Store closed statistics intervals in the archive database.",
+        c"",
+        &ARCHIVE,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
 }
+

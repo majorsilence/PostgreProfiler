@@ -3,7 +3,7 @@
 //! seen, all carved out of one `ShmemInitStruct("pg_profiler")` area.
 //!
 //! ```text
-//! [ statement ring ][ event ring ][ plan ring ][ running slots ][ rules block ][ seen plans ]
+//! [ statement ring ][ event ring ][ plan ring ][ running slots ][ rules block ][ seen plans ][ stats ]
 //! ring = RingHeader (64 bytes) + capacity slots
 //! slot = record + payload_cap bytes of inline payload (query text, params, ...)
 //! ```
@@ -11,8 +11,8 @@
 //! The sizes depend on GUCs, so the raw `pg_sys` shmem API is used instead of
 //! pgrx's fixed-size `PgLwLock<T>`.
 //!
-//! Locking: one named LWLock tranche with four locks (statement ring, event
-//! ring, rules, plan ring). `push` prepares everything before taking the lock and only
+//! Locking: one named LWLock tranche with five locks (statement ring, event
+//! ring, rules, plan ring, statistics rotation). `push` prepares everything before taking the lock and only
 //! does a memcpy under `LW_EXCLUSIVE`; readers copy rows out under `LW_SHARED`.
 //! Lock-free per-slot seqlocks would remove the writer/reader contention
 //! entirely; that is a possible later optimisation. The running slots are
@@ -33,7 +33,8 @@ const LOCK_STMT: usize = 0;
 const LOCK_EVENTS: usize = 1;
 const LOCK_RULES: usize = 2;
 const LOCK_PLANS: usize = 3;
-const NUM_LOCKS: i32 = 4;
+const LOCK_STATS: usize = 4;
+const NUM_LOCKS: i32 = 5;
 /// Entries in the table of plans that were already stored (8 bytes each).
 const SEEN_SLOTS: usize = 16_384;
 
@@ -71,6 +72,7 @@ struct Shared {
     running: *mut u8,
     rules: *mut u8,
     seen: *mut AtomicU64,
+    stats: *mut u8,
     locks: *mut pg_sys::LWLockPadded,
 }
 
@@ -81,6 +83,7 @@ static mut SHARED: Shared = Shared {
     running: ptr::null_mut(),
     rules: ptr::null_mut(),
     seen: ptr::null_mut(),
+    stats: ptr::null_mut(),
     locks: ptr::null_mut(),
 };
 
@@ -106,6 +109,7 @@ struct Layout {
     run_off: usize,
     rules_off: usize,
     seen_off: usize,
+    stats_off: usize,
     total: usize,
 }
 
@@ -128,7 +132,8 @@ impl Layout {
         let run_size = running::region_size();
         let rules_off = run_off + run_size;
         let seen_off = align8(rules_off + rules::BLOCK_SIZE);
-        let total = seen_off + SEEN_SLOTS * 8;
+        let stats_off = align8(seen_off + SEEN_SLOTS * 8);
+        let total = stats_off + crate::stats::region_size();
         Layout {
             stmt_cap,
             stmt_payload,
@@ -142,6 +147,7 @@ impl Layout {
             run_off,
             rules_off,
             seen_off,
+            stats_off,
             total,
         }
     }
@@ -209,6 +215,7 @@ unsafe extern "C-unwind" fn shmem_startup() {
             init_ring::<EventRecord>(base.add(l.ev_off), l.ev_cap, l.ev_payload);
             init_ring::<PlanRecord>(base.add(l.plan_off), l.plan_cap, l.plan_payload);
             ptr::write_bytes(base.add(l.seen_off), 0, SEEN_SLOTS * 8);
+            crate::stats::init(base.add(l.stats_off));
             running::init(base.add(l.run_off));
             rules::init(base.add(l.rules_off));
         }
@@ -219,6 +226,7 @@ unsafe extern "C-unwind" fn shmem_startup() {
             running: base.add(l.run_off),
             rules: base.add(l.rules_off),
             seen: base.add(l.seen_off) as *mut AtomicU64,
+            stats: base.add(l.stats_off),
             locks: pg_sys::GetNamedLWLockTranche(SHMEM_NAME.as_ptr()),
         };
 
@@ -244,6 +252,14 @@ pub fn running_region() -> *mut u8 {
 
 pub fn rules_region() -> *mut u8 {
     shared().rules
+}
+
+pub fn stats_region() -> *mut u8 {
+    shared().stats
+}
+
+pub fn stats_lock() -> LockRef {
+    LockRef(unsafe { &raw mut (*shared().locks.add(LOCK_STATS)).lock })
 }
 
 pub fn rules_lock() -> LockRef {

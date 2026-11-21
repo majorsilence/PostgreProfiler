@@ -9,7 +9,10 @@ mod record;
 mod rules;
 mod running;
 mod ring;
+mod sampler;
 mod sql;
+mod sql_stats;
+mod stats;
 
 ::pgrx::pg_module_magic!(name, version);
 

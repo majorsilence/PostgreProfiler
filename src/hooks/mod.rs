@@ -47,6 +47,12 @@ fn trim_statement(mut s: &[u8]) -> &[u8] {
     s
 }
 
+/// Add a finished statement to the interval statistics. Unlike the ring this
+/// ignores `min_duration_ms` and the capture rules: the totals stay complete.
+pub fn aggregate(rec: &crate::record::TraceRecord, text: &[u8]) {
+    crate::stats::record(rec, text, &[0; crate::stats::WAIT_CATS]);
+}
+
 /// Push a statement record unless the capture rules reject it.
 pub fn emit(rec: &crate::record::TraceRecord, text: &[u8], params: &[u8]) {
     if crate::rules::allows(rec, text) {

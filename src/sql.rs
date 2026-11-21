@@ -76,9 +76,9 @@ fn pg_profiler_reset() {
 /// Who may see query text and parameters of other users' statements:
 /// superusers, members of `pg_read_all_stats` (the `pg_stat_statements` rule)
 /// and members of `profiler_reader`.
-struct Visibility {
-    me: pg_sys::Oid,
-    sees_all: bool,
+pub(crate) struct Visibility {
+    pub(crate) me: pg_sys::Oid,
+    pub(crate) sees_all: bool,
 }
 
 fn has_role(me: pg_sys::Oid, name: &std::ffi::CStr) -> bool {
@@ -88,7 +88,7 @@ fn has_role(me: pg_sys::Oid, name: &std::ffi::CStr) -> bool {
     }
 }
 
-fn visibility() -> Visibility {
+pub(crate) fn visibility() -> Visibility {
     unsafe {
         let me = pg_sys::GetUserId();
         let sees_all = pg_sys::superuser()
@@ -98,9 +98,9 @@ fn visibility() -> Visibility {
     }
 }
 
-const MASKED: &str = "<insufficient privilege>";
+pub(crate) const MASKED: &str = "<insufficient privilege>";
 
-fn text_of(bytes: &[u8]) -> Option<String> {
+pub(crate) fn text_of(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() {
         None
     } else {
@@ -112,7 +112,7 @@ fn cstr_opt(buf: &[u8]) -> Option<String> {
     text_of(c_bytes(buf))
 }
 
-fn ts(v: i64) -> Option<TimestampWithTimeZone> {
+pub(crate) fn ts(v: i64) -> Option<TimestampWithTimeZone> {
     if v == 0 {
         None
     } else {

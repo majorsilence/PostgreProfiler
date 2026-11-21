@@ -217,6 +217,7 @@ fn record_error(qd: *mut pg_sys::QueryDesc, e: &CaughtError) {
         rec.sqlstate = error_sqlstate(e);
         set_cpu(&mut rec, &info);
         let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
+        super::aggregate(&rec, text);
         let params = super::param_text((*qd).params);
         super::emit(&rec, text, &params);
     }
@@ -295,6 +296,8 @@ unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
         rec.rows = (*(*qd).estate).es_total_processed;
         set_cpu(&mut rec, info);
         fill_usage(&mut rec, &tt.bufusage, &tt.walusage);
+        let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
+        super::aggregate(&rec, text);
         if info.plan_sampled {
             crate::plan::capture_outlier(qd, info.plan_id, rec.exec_time_us, rec.temp_blks_written);
         }
@@ -302,7 +305,6 @@ unsafe fn record_finished(qd: *mut pg_sys::QueryDesc, info: &StartInfo) {
             return;
         }
 
-        let text = statement_text((*qd).sourceText, plan.stmt_location, plan.stmt_len);
         let params = super::param_text((*qd).params);
         super::emit(&rec, text, &params);
     }
