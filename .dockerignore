@@ -2,3 +2,6 @@
 .claude
 target
 **/*.rs.bk
+ui/target
+ui/web/node_modules
+ui/web/dist

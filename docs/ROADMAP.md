@@ -404,10 +404,55 @@ noise (about 10 %). That is on the shortest possible statements, but it means th
 ### Phase D: GUI  (XL, can start after phase A's API contract exists)
 1. **D1 (after A):** server skeleton, auth, Live Trace, Running Now, Events,
    Settings, Docker image and compose service, a demo stack with a workload
-   generator.
+   generator. **Built**, see "Phase D1 as built" below.
 2. **D2 (after C):** Query Store screens, plan viewer and plan diff.
 3. Saved templates and trace export (file); Playwright end-to-end tests against
    the compose stack; accessibility and keyboard basics.
+
+**Phase D1 as built** (`ui/`, its own Cargo workspace, version 0.1.0):
+
+- **Server** (`ui/server`): `axum` 0.8 + `tokio-postgres` through `deadpool-postgres`.
+  There is almost no Rust that knows a column: every endpoint runs a SQL query
+  wrapped in `jsonb_agg(to_jsonb(t))` and forwards the JSON, so the extension's SQL
+  API stays the single contract. Integers beyond 2^53 (query and plan ids) are sent
+  as strings, because JavaScript would round them; OIDs arrive as strings from
+  `to_jsonb`. Two pools: a reader (`profiler_reader` + `pg_read_all_stats`) and an
+  optional admin pool (rules, reset, cancel/terminate). The UI's own connections are
+  named `pg_profiler_ui` and filtered out so its polling does not fill the trace.
+- **Live feed:** one background poller reads `pg_profiler_since` and
+  `pg_profiler_events_since` every 500 ms, only while somebody listens, and
+  broadcasts batches over a `tokio::broadcast` channel to every SSE client, so the
+  database load does not grow with the number of viewers. A client that falls behind
+  gets a `lagged` event; a ring that wrapped sets `lapped` (the UI shows a notice).
+- **Auth:** local users with Argon2id hashes (`hash-password` subcommand), random
+  256-bit session tokens in memory, `HttpOnly; SameSite=Strict` cookie, a required
+  `X-Profiler-UI` header on every mutating request, CSP and friends on every
+  response, failed logins delayed. Deliberately not done: OIDC, TLS termination,
+  login rate limiting per address, persistent sessions.
+- **SPA** (`ui/web`): Vue 3 + TypeScript + Vite, no component library. Filtering,
+  grouping, CSV export (formula-safe), merge-by-sequence and the blocking tree are
+  pure functions with unit tests (vitest). Not virtualised: the grid renders 300 rows
+  at a time and keeps at most 5000 in memory.
+- **Not in D1:** the plan viewer (the detail pane shows the plan as text; pev2 is
+  decision 7 and belongs to D2), saved templates, a lock-wait timeline, a deadlock
+  graph (the cycle is shown as the server logged it), column filters per column,
+  Query Store screens, saved connections, Playwright tests. Waits per statement
+  and a time-series view need phase C's data and are D2.
+- **Packaging:** `ui/Dockerfile` (node build with tests, cargo build with tests,
+  slim runtime as an unprivileged user), `docker-compose.demo.yml` (database with the
+  extension, UI, and `docker/workload.sh`: steady transactions, reports, errors, a
+  long statement, lock contention behind an idle transaction, a periodic deadlock).
+  CI builds the demo stack and runs `scripts/e2e-ui.sh`.
+- **Dependencies and licences:** all permissive and compatible with the four project
+  licences: Rust: axum, tokio, tokio-postgres, deadpool-postgres, serde, rand,
+  argon2, rust-embed, mime_guess, tracing (MIT and/or Apache-2.0); web: vue,
+  vue-router, vite, vitest, typescript (MIT / Apache-2.0). pev2 still needs its
+  licence checked before D2.
+- **Found while building it:** a reader that is not in `pg_read_all_stats` sees no
+  state or wait events of other users' sessions in `pg_profiler_activity`; the docs
+  and the demo grant it. Starting the stream while many statements run delivers
+  hundreds of rows per second to the browser; the UI caps its buffer, and per-viewer
+  server-side filters would be the next step if that becomes a problem.
 
 ### Phase E: hints and plan forcing  (XL, starts with a spike)
 - **E0 spike, go/no-go:** forcing a specific plan in Postgres has no native
@@ -466,8 +511,8 @@ what we did about it:
 
 ### Suggested order
 `A → H → D1 (parallel with B) → C → D2 → E0 → E1/E2/E3 → G`, with F slotted in
-wherever OTLP is wanted. A, H, B and C are done; D1 (the GUI skeleton) and D2 (Query Store
-screens) are next, then E0 (the plan forcing spike).
+wherever OTLP is wanted. A, H, B, C and D1 are done; D2 (Query Store screens and the plan viewer) is
+next, then E0 (the plan forcing spike).
 
 ## 6. Cross-cutting concerns
 

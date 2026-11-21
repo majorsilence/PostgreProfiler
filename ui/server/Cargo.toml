@@ -1,0 +1,23 @@
+[package]
+name = "pg_profiler_ui"
+version = "0.1.0"
+edition = "2021"
+description = "Web UI server for the pg_profiler extension"
+license = "MIT OR BSD-3-Clause OR Apache-2.0 OR PostgreSQL"
+repository = "https://github.com/majorsilence/PostgreProfiler"
+
+[dependencies]
+argon2 = "0.5"
+axum = "0.8"
+deadpool-postgres = "0.14"
+futures-util = "0.3"
+mime_guess = "2"
+rand = "0.8"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,9 @@
+# The UI server is its own workspace so the pgrx extension's build flags and
+# dependencies do not leak into it (and the other way round).
+[workspace]
+members = ["server"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

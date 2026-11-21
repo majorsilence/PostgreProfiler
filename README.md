@@ -38,6 +38,58 @@ docker compose up --build -d db
 psql postgres://postgres:postgres@localhost:5432/postgres -c 'CREATE EXTENSION pg_profiler'
 ```
 
+## Web UI
+
+A web application in [`ui/`](ui) shows the live trace, what is running now (with
+the blocking tree), the events, and the settings and health of the extension. It
+is a small Rust server (`axum`) that reads the extension's SQL API and serves a
+Vue + TypeScript single-page app embedded in the one binary.
+
+```sh
+# database + UI + a workload that produces traffic, locks, errors and a deadlock now and then
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+# open http://localhost:8080 : admin / admin (may change settings), viewer / viewer (read only)
+```
+
+- **Live Trace:** executions stream in as they finish (Server-Sent Events). Pause and
+  resume, find in statements and parameters, filter by application, user, database,
+  type, minimum duration, errors and top level, choose columns, group by statement,
+  application, user or session, open an execution to see the full statement, its
+  buffers and its stored plan, and export the filtered rows as CSV.
+- **Running Now:** the statements running right now with their wait events and a
+  tree of who blocks whom. A session that is idle in a transaction and holds locks
+  others wait for appears as its own root. Admins can cancel a statement or
+  terminate a session.
+- **Events:** deadlocks (with the whole cycle), lock waits, cancels, terminated
+  sessions and failed logins; logins and logouts are hidden until you ask for them.
+- **Settings & health:** version, buffer fill and overwrites, statistics state, all
+  `pg_profiler.*` settings, and (admin) capture rules and clearing the buffers.
+
+**Configuration** is by environment variables: `PROFILER_DB_URL` (required, a member
+of `profiler_reader`; also `pg_read_all_stats` for the state, wait events and
+blockers of other users' sessions), `PROFILER_ADMIN_DB_URL` (optional, a member of
+`profiler_admin` and `pg_signal_backend`; without it the admin actions are off),
+`UI_LISTEN` (default `0.0.0.0:8080`), users in `UI_USERS` / `UI_USERS_FILE` as lines
+`name:admin|viewer:argon2-hash` (make hashes with `pg_profiler_ui hash-password`;
+`UI_ADMIN_PASSWORD` and `UI_VIEWER_PASSWORD` are for demos), `UI_SESSION_HOURS` and
+`UI_COOKIE_SECURE=1` behind TLS.
+
+**Security:** the UI has its own login (Argon2 password hashes, random session
+tokens in an `HttpOnly`, `SameSite=Strict` cookie, kept in memory), refuses
+state-changing requests that lack its own header, sets a strict
+Content-Security-Policy, and never logs query text (database errors are logged
+without being sent to the browser). It speaks plain HTTP and plain PostgreSQL
+connections: put it behind a TLS proxy and keep it on a private network.
+Statements run by the UI itself (`application_name = pg_profiler_ui`) are not shown.
+Query text and parameters are as sensitive in the UI as in the database; anyone who
+can sign in sees everything `profiler_reader` sees.
+
+**Building and testing** happen in Docker: `docker build ui/` runs the web app's
+unit tests (vitest) and the server's tests, and `scripts/e2e-ui.sh` checks login,
+permissions, the endpoints, the live stream and the admin actions against the demo
+stack. The Query Store screens (top consumers, regressed queries, wait statistics,
+plan viewer) are the next step ([docs/ROADMAP.md](docs/ROADMAP.md), phase D2).
+
 ## Upgrading
 
 After installing a new version of the library, run `ALTER EXTENSION pg_profiler UPDATE;`

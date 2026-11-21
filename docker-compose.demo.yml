@@ -1,0 +1,49 @@
+# A complete demo: the database with the extension, the web UI and a workload
+# that produces interesting traffic.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+#   open http://localhost:8080   (user admin / password admin, or viewer / viewer)
+#
+# The init script only runs when the database volume is created, so start from
+# a fresh one (`docker compose ... down -v`) if you used `db` on its own before.
+# Demo credentials only.
+services:
+  db:
+    volumes:
+      - ./docker/demo-init.sql:/docker-entrypoint-initdb.d/10-demo.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  ui:
+    build:
+      context: ./ui
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PROFILER_DB_URL: postgres://profiler_ui:profiler_ui@db:5432/postgres
+      PROFILER_ADMIN_DB_URL: postgres://profiler_ui_admin:profiler_ui_admin@db:5432/postgres
+      UI_ADMIN_PASSWORD: admin
+      UI_VIEWER_PASSWORD: viewer
+    ports:
+      - "8080:8080"
+
+  workload:
+    build:
+      context: .
+      target: postgres
+      args:
+        PG_MAJOR: ${PG_MAJOR:-18}
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: ["bash", "/workload.sh"]
+    environment:
+      PGHOST: db
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    volumes:
+      - ./docker/workload.sh:/workload.sh:ro
