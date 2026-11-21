@@ -134,6 +134,75 @@ or JSON (`EXPLAIN (FORMAT JSON)` layout, suitable for plan viewers). Plan text
 follows the same visibility rule as query text, and can contain constants from
 the query.
 
+### Statistics and history (Query Store)
+
+Besides the individual executions, every tracked statement is added to
+**per-interval statistics** (default: 5 minutes) per database, role, query and
+plan: calls, errors, total/min/max execution time, the sum of squares (for the
+standard deviation), planning time, rows, buffer, WAL, CPU and I/O counters, a
+latency histogram (percentiles) and wait samples. They are kept in memory for the
+last four intervals and copied by a background worker into tables of the
+**archive database**, so they survive restarts and give you history.
+
+```sql
+-- statistics per interval: the archive plus intervals not yet archived
+SELECT * FROM pg_profiler_runtime_stats WHERE queryid = 1234567890;
+
+-- the report functions (all take a time range; see the argument defaults)
+SELECT queryid, calls, total_exec_ms, avg_exec_ms, p95_exec_ms, query
+  FROM pg_profiler_top_consumers('exec_time', now() - interval '1 day', now(), 10);
+SELECT * FROM pg_profiler_overall_consumption(now() - interval '1 day', now(), interval '1 hour');
+SELECT * FROM pg_profiler_high_variation();                  -- highest coefficient of variation
+SELECT * FROM pg_profiler_query_history(1234567890);         -- one query, per interval and plan
+SELECT * FROM pg_profiler_wait_stats();                      -- samples per wait category
+-- queries that got slower than before, with a statistical test and plan-change flag
+SELECT queryid, baseline_avg_ms, recent_avg_ms, ratio, z_score, plan_changed, query
+  FROM pg_profiler_regressed_queries();                      -- last hour against the 24 hours before
+```
+
+`pg_profiler_top_consumers` takes a metric: `exec_time`, `avg_time`, `calls`,
+`rows`, `reads`, `temp`, `wal`, `cpu`, `io_time` or `plan_time`.
+`pg_profiler_regressed_queries` lists a query when its mean run time grew by at
+least `min_ratio` (default 1.5) and Welch's t statistic, computed from the sums
+and sums of squares, is at least `min_z` (default 3) with at least `min_calls`
+calls in both windows.
+
+**Setup.** The archiver stores everything in one database,
+`pg_profiler.archive_database` (default `postgres`), which needs
+`CREATE EXTENSION pg_profiler`; until it has the extension the worker only logs
+a reminder. The tables are `pg_profiler_hist_stats` (partitioned by day, created
+on demand), `pg_profiler_hist_queries`, `pg_profiler_hist_plans` (one row per plan
+shape, at most `max_plans_per_query` per query) and `pg_profiler_hist_plan_samples`
+(outlier plans with actual rows). Read access, including the views and report
+functions, is granted to `profiler_reader`; the query text and plans are as
+sensitive as in the trace. Retention runs hourly: daily partitions older than
+`retention_days` are dropped, then the oldest day while the history exceeds
+`max_archive_size_mb`, and stale queries, plans and samples are deleted
+(`pg_profiler_purge()` does the same on demand). Other databases see the statistics
+still in memory through the same views, which is enough for a quick look.
+
+Things to know:
+
+- The statistics count every tracked statement, whatever `min_duration_ms` and the
+  capture rules say, so totals are complete. `sample_rate` still applies, and with
+  `stats_capture = auto` a query only gets an entry once a run took at least
+  `stats_auto_min_ms` (or failed).
+- Errors are counted in `errors`, not in `calls`, and add nothing to the timings.
+- The interval in progress is saved when the server shuts down cleanly, but not
+  after a crash or on a standby, which keeps its statistics in memory only.
+- If the archiver cannot keep up (or `archive = off`), an interval that falls out
+  of memory unarchived is counted in `lost_intervals` (`pg_profiler_stats_info()`).
+  When an interval has more distinct entries than `stats_entries`, the rest are
+  counted in `dropped_entries`.
+- **Wait sampling:** a worker looks every `wait_sample_ms` (default 10) at what each
+  running statement is waiting for and counts it by category (`pg_profiler_wait_categories()`:
+  cpu, lwlock, lock, io, ...). It is statistical, so statements shorter than the
+  period show nothing, samples are attributed to the top-level statement, and it
+  needs `track_running`.
+- Percentiles come from a histogram with two buckets per octave, so they are
+  accurate to about 20 %.
+- Plan fingerprints (`plan_id`) are not comparable across server versions.
+
 ### Events (`pg_profiler_events()`, `pg_profiler_events_since()`)
 
 | `kind` | Recorded when | Notes |
@@ -205,13 +274,26 @@ buffer churn but not instrumentation overhead.
 | `pg_profiler.plan_sample_rate` | `0` | superuser | Fraction (0–1) of statements run with row counting so that outliers can be stored with actual rows |
 | `pg_profiler.plan_outlier_ms` | `1000` | superuser | A sampled statement slower than this is stored with actual rows (`0` = off) |
 | `pg_profiler.plan_misestimate_ratio` | `100` | superuser | A sampled statement with an estimate off by more than this factor is stored (`0` = off) |
+| `pg_profiler.stats_capture` | `all` | superuser | `all`, `auto` or `none`: which statements go into the interval statistics |
+| `pg_profiler.stats_auto_min_ms` | `1` | superuser | In `auto` mode, the run time that makes a query worth tracking |
+| `pg_profiler.stats_interval` | `300` | restart | Length of a statistics interval in seconds (choose a divisor of a day) |
+| `pg_profiler.stats_entries` | `5000` | restart | Distinct (database, role, query, plan) entries per interval |
+| `pg_profiler.stats_text_len` | `1024` | restart | Bytes of query text kept per query for the statistics |
+| `pg_profiler.wait_sample_ms` | `10` | restart | Wait sampling period in milliseconds (`0` = off) |
+| `pg_profiler.archive` | `on` | reload | Store closed intervals in the archive database |
+| `pg_profiler.archive_database` | `postgres` | restart | Database that holds the history; needs the extension |
+| `pg_profiler.retention_days` | `30` | reload | Days of history to keep (`0` = forever) |
+| `pg_profiler.max_archive_size_mb` | `1024` | reload | Size cap for the history; the oldest day is dropped first (`0` = no cap) |
+| `pg_profiler.max_plans_per_query` | `20` | reload | Plans kept per query in the history (`0` = no cap) |
 
 Memory: everything is allocated once at server start. A statement slot is 336
 bytes + `max_query_len` + `max_param_len`; an event slot is 160 bytes +
 `event_detail_len`; a plan slot is 88 bytes + `max_plan_len` + `max_query_len`;
 the running view costs `max_connections` × (about 70 bytes + `running_query_len`);
-the table of plans already seen is 128 KB. With the defaults that is about
-24 MB + 4.4 MB + 5 MB + 0.1 MB.
+the table of plans already seen is 128 KB; the statistics keep four intervals of
+`stats_entries` entries of 488 bytes plus one `stats_text_len` text per entry
+(and 48 bytes of wait counters per backend). With the defaults that is about
+24 MB + 4.4 MB + 5 MB + 0.1 MB + 15 MB.
 When a ring is full the oldest rows are overwritten (`pg_profiler_info()` counts
 them).
 

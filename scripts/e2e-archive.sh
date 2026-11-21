@@ -25,6 +25,8 @@ p=$(sql -c "SELECT count(*) FROM pg_profiler_hist_plans")
 [ "$p" -ge 1 ] || fail "no plans archived"
 dup=$(sql -c "SELECT count(*) FROM (SELECT interval_start, dbid, userid, queryid, plan_id FROM pg_profiler_runtime_stats GROUP BY 1,2,3,4,5 HAVING count(*) > 1) d")
 [ "$dup" -eq 0 ] || fail "runtime_stats counts $dup rows twice"
+t=$(sql -c "SELECT count(*) FROM pg_profiler_top_consumers('exec_time', now() - interval '1 hour', now() + interval '1 hour', 5)")
+[ "$t" -ge 1 ] || fail "top consumers report is empty"
 lost=$(sql -c "SELECT lost_intervals FROM pg_profiler_stats_info()")
 [ "$lost" -eq 0 ] || fail "$lost intervals were lost before they were archived"
 echo "archive end-to-end OK: $w wait samples, $n intervals, $calls calls, $q pgbench queries, $p plans"

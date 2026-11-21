@@ -440,3 +440,253 @@ GRANT SELECT ON pg_profiler_hist_stats, pg_profiler_hist_queries, pg_profiler_hi
     name = "history",
     requires = ["stats_helpers", "roles_and_grants", pg_profiler_stats_memory_rows, pg_profiler_stats_texts_rows]
 );
+
+// Reports over the statistics, modelled on the Query Store reports: top
+// consumers, overall consumption, queries with high variation, the history of
+// one query, regressed queries and where statements wait.
+extension_sql!(
+    r#"
+-- Top resource consumers. metric: exec_time, avg_time, calls, rows, reads (shared
+-- blocks read), temp (temp blocks written), wal (bytes), cpu, io_time, plan_time.
+CREATE FUNCTION pg_profiler_top_consumers(
+    metric text DEFAULT 'exec_time',
+    from_ts timestamptz DEFAULT now() - interval '1 hour',
+    to_ts timestamptz DEFAULT now(),
+    lim int DEFAULT 20)
+RETURNS TABLE (
+    dbid oid, queryid bigint, query text, calls bigint, errors bigint,
+    total_exec_ms float8, avg_exec_ms float8, stddev_exec_ms float8, p95_exec_ms float8,
+    rows bigint, shared_blks_read bigint, temp_blks_written bigint, wal_bytes bigint,
+    cpu_ms float8, io_ms float8, plans bigint, metric_value float8)
+LANGUAGE plpgsql STABLE AS $$
+BEGIN
+    IF metric NOT IN ('exec_time', 'avg_time', 'calls', 'rows', 'reads', 'temp', 'wal', 'cpu', 'io_time', 'plan_time') THEN
+        RAISE EXCEPTION 'unknown metric "%"', metric
+            USING HINT = 'Use exec_time, avg_time, calls, rows, reads, temp, wal, cpu, io_time or plan_time.';
+    END IF;
+    RETURN QUERY
+    WITH s AS (
+        SELECT r.dbid, r.queryid,
+               sum(r.calls)::bigint AS calls, sum(r.errors)::bigint AS errors,
+               sum(r.exec_total_ms) AS total, sum(r.exec_sumsq_ms2) AS sumsq,
+               sum(r.rows)::bigint AS rows, sum(r.shared_blks_read)::bigint AS reads,
+               sum(r.temp_blks_written)::bigint AS temp, sum(r.wal_bytes)::bigint AS wal,
+               sum(r.cpu_user_ms + r.cpu_sys_ms) AS cpu, sum(r.blk_read_ms + r.blk_write_ms) AS io,
+               sum(r.plan_total_ms) AS plan_ms,
+               count(DISTINCT r.plan_id) FILTER (WHERE r.plan_id <> 0) AS plans,
+               pg_profiler_hist_agg(r.hist) AS hist
+          FROM pg_profiler_runtime_stats r
+         WHERE r.interval_start >= from_ts AND r.interval_start < to_ts
+         GROUP BY r.dbid, r.queryid
+    )
+    SELECT s.dbid, s.queryid, q.query, s.calls, s.errors,
+           s.total, s.total / NULLIF(s.calls, 0),
+           sqrt(greatest(s.sumsq / NULLIF(s.calls, 0) - (s.total / NULLIF(s.calls, 0)) ^ 2, 0)),
+           pg_profiler_hist_percentile(s.hist, 0.95),
+           s.rows, s.reads, s.temp, s.wal, s.cpu, s.io, s.plans,
+           CASE metric
+               WHEN 'exec_time' THEN s.total
+               WHEN 'avg_time' THEN s.total / NULLIF(s.calls, 0)
+               WHEN 'calls' THEN s.calls::float8
+               WHEN 'rows' THEN s.rows::float8
+               WHEN 'reads' THEN s.reads::float8
+               WHEN 'temp' THEN s.temp::float8
+               WHEN 'wal' THEN s.wal::float8
+               WHEN 'cpu' THEN s.cpu
+               WHEN 'io_time' THEN s.io
+               WHEN 'plan_time' THEN s.plan_ms
+           END AS metric_value
+      FROM s LEFT JOIN pg_profiler_queries q ON q.dbid = s.dbid AND q.queryid = s.queryid
+     ORDER BY 17 DESC NULLS LAST, s.queryid
+     LIMIT lim;
+END $$;
+
+-- Overall consumption: the totals of everything, per time bucket.
+CREATE FUNCTION pg_profiler_overall_consumption(
+    from_ts timestamptz DEFAULT now() - interval '24 hours',
+    to_ts timestamptz DEFAULT now(),
+    bucket interval DEFAULT interval '1 hour')
+RETURNS TABLE (
+    bucket_start timestamptz, calls bigint, errors bigint, exec_total_ms float8, avg_exec_ms float8,
+    rows bigint, shared_blks_read bigint, shared_blks_written bigint, temp_blks_written bigint,
+    wal_bytes bigint, cpu_ms float8, distinct_queries bigint)
+LANGUAGE sql STABLE AS $$
+    SELECT date_bin(bucket, r.interval_start, from_ts),
+           sum(r.calls)::bigint, sum(r.errors)::bigint, sum(r.exec_total_ms),
+           sum(r.exec_total_ms) / NULLIF(sum(r.calls), 0),
+           sum(r.rows)::bigint, sum(r.shared_blks_read)::bigint, sum(r.shared_blks_written)::bigint,
+           sum(r.temp_blks_written)::bigint, sum(r.wal_bytes)::bigint,
+           sum(r.cpu_user_ms + r.cpu_sys_ms), count(DISTINCT (r.dbid, r.queryid))
+      FROM pg_profiler_runtime_stats r
+     WHERE r.interval_start >= from_ts AND r.interval_start < to_ts
+     GROUP BY 1
+     ORDER BY 1
+$$;
+
+-- Queries whose run time varies a lot: highest coefficient of variation first.
+CREATE FUNCTION pg_profiler_high_variation(
+    from_ts timestamptz DEFAULT now() - interval '1 hour',
+    to_ts timestamptz DEFAULT now(),
+    lim int DEFAULT 20,
+    min_calls bigint DEFAULT 10)
+RETURNS TABLE (
+    dbid oid, queryid bigint, query text, calls bigint, avg_exec_ms float8, stddev_exec_ms float8,
+    cv float8, min_exec_ms float8, max_exec_ms float8, p50_exec_ms float8, p95_exec_ms float8,
+    p99_exec_ms float8)
+LANGUAGE sql STABLE AS $$
+    WITH s AS (
+        SELECT r.dbid, r.queryid, sum(r.calls)::bigint AS calls,
+               sum(r.exec_total_ms) AS total, sum(r.exec_sumsq_ms2) AS sumsq,
+               min(r.exec_min_ms) FILTER (WHERE r.calls > 0) AS mn, max(r.exec_max_ms) AS mx,
+               pg_profiler_hist_agg(r.hist) AS hist
+          FROM pg_profiler_runtime_stats r
+         WHERE r.interval_start >= from_ts AND r.interval_start < to_ts
+         GROUP BY r.dbid, r.queryid
+        HAVING sum(r.calls) >= min_calls
+    ), v AS (
+        SELECT s.*, s.total / s.calls AS mean,
+               sqrt(greatest(s.sumsq / s.calls - (s.total / s.calls) ^ 2, 0)) AS sd
+          FROM s
+    )
+    SELECT v.dbid, v.queryid, q.query, v.calls, v.mean, v.sd, v.sd / NULLIF(v.mean, 0),
+           v.mn, v.mx,
+           pg_profiler_hist_percentile(v.hist, 0.50), pg_profiler_hist_percentile(v.hist, 0.95),
+           pg_profiler_hist_percentile(v.hist, 0.99)
+      FROM v LEFT JOIN pg_profiler_queries q ON q.dbid = v.dbid AND q.queryid = v.queryid
+     ORDER BY 7 DESC NULLS LAST, v.queryid
+     LIMIT lim
+$$;
+
+-- One query over time, per interval and plan (the "tracked query" report).
+CREATE FUNCTION pg_profiler_query_history(
+    queryid bigint,
+    from_ts timestamptz DEFAULT now() - interval '24 hours',
+    to_ts timestamptz DEFAULT now(),
+    dbid oid DEFAULT NULL)
+RETURNS TABLE (
+    interval_start timestamptz, plan_id bigint, calls bigint, errors bigint,
+    avg_exec_ms float8, stddev_exec_ms float8, min_exec_ms float8, max_exec_ms float8,
+    p95_exec_ms float8, rows bigint, shared_blks_read bigint, temp_blks_written bigint)
+LANGUAGE sql STABLE AS $$
+    SELECT r.interval_start, r.plan_id, sum(r.calls)::bigint, sum(r.errors)::bigint,
+           sum(r.exec_total_ms) / NULLIF(sum(r.calls), 0),
+           sqrt(greatest(sum(r.exec_sumsq_ms2) / NULLIF(sum(r.calls), 0)
+                         - (sum(r.exec_total_ms) / NULLIF(sum(r.calls), 0)) ^ 2, 0)),
+           min(r.exec_min_ms) FILTER (WHERE r.calls > 0), max(r.exec_max_ms),
+           pg_profiler_hist_percentile(pg_profiler_hist_agg(r.hist), 0.95),
+           sum(r.rows)::bigint, sum(r.shared_blks_read)::bigint, sum(r.temp_blks_written)::bigint
+      FROM pg_profiler_runtime_stats r
+     WHERE r.queryid = pg_profiler_query_history.queryid
+       AND (pg_profiler_query_history.dbid IS NULL OR r.dbid = pg_profiler_query_history.dbid)
+       AND r.interval_start >= from_ts AND r.interval_start < to_ts
+     GROUP BY r.interval_start, r.plan_id
+     ORDER BY r.interval_start, r.plan_id
+$$;
+
+-- Regressed queries: a recent window against a baseline window. A query is
+-- listed when its mean run time grew by at least min_ratio and Welch's t
+-- statistic (computed from the sums and sums of squares) is at least min_z,
+-- both windows having at least min_calls calls. plan_changed says that the
+-- recent window used a plan the baseline did not.
+CREATE FUNCTION pg_profiler_regressed_queries(
+    recent_from timestamptz DEFAULT now() - interval '1 hour',
+    recent_to timestamptz DEFAULT now(),
+    baseline_from timestamptz DEFAULT now() - interval '25 hours',
+    baseline_to timestamptz DEFAULT now() - interval '1 hour',
+    min_calls bigint DEFAULT 10,
+    min_ratio float8 DEFAULT 1.5,
+    min_z float8 DEFAULT 3.0,
+    lim int DEFAULT 50)
+RETURNS TABLE (
+    dbid oid, queryid bigint, query text,
+    baseline_calls bigint, recent_calls bigint,
+    baseline_avg_ms float8, recent_avg_ms float8, ratio float8, z_score float8,
+    added_time_ms float8, plan_changed boolean, baseline_plans bigint[], recent_plans bigint[])
+LANGUAGE sql STABLE AS $$
+    WITH w AS (
+        SELECT r.dbid, r.queryid, r.plan_id,
+               (r.interval_start >= recent_from AND r.interval_start < recent_to) AS is_recent,
+               r.calls, r.exec_total_ms, r.exec_sumsq_ms2
+          FROM pg_profiler_runtime_stats r
+         WHERE (r.interval_start >= recent_from AND r.interval_start < recent_to)
+            OR (r.interval_start >= baseline_from AND r.interval_start < baseline_to)
+    ), q AS (
+        SELECT w.dbid, w.queryid,
+               sum(w.calls) FILTER (WHERE NOT w.is_recent) AS n1,
+               sum(w.exec_total_ms) FILTER (WHERE NOT w.is_recent) AS t1,
+               sum(w.exec_sumsq_ms2) FILTER (WHERE NOT w.is_recent) AS s1,
+               sum(w.calls) FILTER (WHERE w.is_recent) AS n2,
+               sum(w.exec_total_ms) FILTER (WHERE w.is_recent) AS t2,
+               sum(w.exec_sumsq_ms2) FILTER (WHERE w.is_recent) AS s2,
+               array_agg(DISTINCT w.plan_id) FILTER (WHERE NOT w.is_recent AND w.calls > 0 AND w.plan_id <> 0) AS plans1,
+               array_agg(DISTINCT w.plan_id) FILTER (WHERE w.is_recent AND w.calls > 0 AND w.plan_id <> 0) AS plans2
+          FROM w GROUP BY w.dbid, w.queryid
+    ), m AS (
+        SELECT q.*, t1 / n1 AS mean1, t2 / n2 AS mean2,
+               greatest((s1 - n1 * (t1 / n1) ^ 2) / NULLIF(n1 - 1, 0), 0) AS var1,
+               greatest((s2 - n2 * (t2 / n2) ^ 2) / NULLIF(n2 - 1, 0), 0) AS var2
+          FROM q
+         WHERE n1 >= min_calls AND n2 >= min_calls
+    ), z AS (
+        SELECT m.*, mean2 / NULLIF(mean1, 0) AS ratio,
+               CASE WHEN var1 / n1 + var2 / n2 > 0
+                    THEN (mean2 - mean1) / sqrt(var1 / n1 + var2 / n2)
+                    WHEN mean2 > mean1 THEN 'Infinity'::float8
+                    ELSE 0 END AS zs
+          FROM m
+    )
+    SELECT z.dbid, z.queryid, qq.query, z.n1::bigint, z.n2::bigint, z.mean1, z.mean2, z.ratio, z.zs,
+           (z.mean2 - z.mean1) * z.n2,
+           coalesce(NOT (z.plans2 <@ z.plans1), false),
+           coalesce(z.plans1, '{}'), coalesce(z.plans2, '{}')
+      FROM z LEFT JOIN pg_profiler_queries qq ON qq.dbid = z.dbid AND qq.queryid = z.queryid
+     WHERE z.ratio >= min_ratio AND z.zs >= min_z
+     ORDER BY (z.mean2 - z.mean1) * z.n2 DESC, z.queryid
+     LIMIT lim
+$$;
+
+-- Where statements wait: samples per wait category (needs the wait sampler).
+CREATE FUNCTION pg_profiler_wait_stats(
+    from_ts timestamptz DEFAULT now() - interval '1 hour',
+    to_ts timestamptz DEFAULT now(),
+    lim int DEFAULT 50)
+RETURNS TABLE (dbid oid, queryid bigint, query text, category text, samples bigint, pct_of_query float8)
+LANGUAGE sql STABLE AS $$
+    WITH per_cat AS (
+        SELECT r.dbid, r.queryid, c.name AS category, sum(w.cnt)::bigint AS samples
+          FROM pg_profiler_runtime_stats r
+         CROSS JOIN LATERAL unnest(r.wait_samples) WITH ORDINALITY AS w(cnt, ord)
+          JOIN unnest(pg_profiler_wait_categories()) WITH ORDINALITY AS c(name, ord) ON c.ord = w.ord
+         WHERE r.interval_start >= from_ts AND r.interval_start < to_ts
+         GROUP BY r.dbid, r.queryid, c.name
+    ), tot AS (
+        SELECT p.*, sum(p.samples) OVER (PARTITION BY p.dbid, p.queryid) AS total
+          FROM per_cat p
+    )
+    SELECT t.dbid, t.queryid, q.query, t.category, t.samples, 100.0 * t.samples / NULLIF(t.total, 0)
+      FROM tot t LEFT JOIN pg_profiler_queries q ON q.dbid = t.dbid AND q.queryid = t.queryid
+     WHERE t.samples > 0
+     ORDER BY t.samples DESC, t.queryid, t.category
+     LIMIT lim
+$$;
+
+GRANT EXECUTE ON FUNCTION
+    pg_profiler_top_consumers(text, timestamptz, timestamptz, int),
+    pg_profiler_overall_consumption(timestamptz, timestamptz, interval),
+    pg_profiler_high_variation(timestamptz, timestamptz, int, bigint),
+    pg_profiler_query_history(bigint, timestamptz, timestamptz, oid),
+    pg_profiler_regressed_queries(timestamptz, timestamptz, timestamptz, timestamptz, bigint, float8, float8, int),
+    pg_profiler_wait_stats(timestamptz, timestamptz, int)
+  TO profiler_reader;
+REVOKE ALL ON FUNCTION
+    pg_profiler_top_consumers(text, timestamptz, timestamptz, int),
+    pg_profiler_overall_consumption(timestamptz, timestamptz, interval),
+    pg_profiler_high_variation(timestamptz, timestamptz, int, bigint),
+    pg_profiler_query_history(bigint, timestamptz, timestamptz, oid),
+    pg_profiler_regressed_queries(timestamptz, timestamptz, timestamptz, timestamptz, bigint, float8, float8, int),
+    pg_profiler_wait_stats(timestamptz, timestamptz, int)
+  FROM PUBLIC;
+"#,
+    name = "reports",
+    requires = ["history"]
+);
