@@ -38,6 +38,17 @@ docker compose up --build -d db
 psql postgres://postgres:postgres@localhost:5432/postgres -c 'CREATE EXTENSION pg_profiler'
 ```
 
+## Upgrading
+
+After installing a new version of the library, run `ALTER EXTENSION pg_profiler UPDATE;`
+in each database that has the extension (and restart the server if the release
+notes say a setting changed). Upgrade scripts live in [`sql/`](sql) and are part of
+the package; `scripts/test-upgrade.sh` checks that an upgraded database matches a
+fresh install. **0.2.0** adds the statistics, history and reports (it needs the new
+library; the 0.1.0 SQL objects are unchanged). To cut a release: bump `version` in
+`Cargo.toml`, add `sql/pg_profiler--<old>--<new>.sql`, keep the old install script
+under `tests/upgrade/`, and extend the upgrade test.
+
 ## Usage
 
 ```sql

@@ -68,6 +68,8 @@ jobs:
           docker compose exec -T db psql -U postgres -c "SELECT * FROM pg_profiler_info();"
       - name: Statistics history end-to-end
         run: bash scripts/e2e-archive.sh
+      - name: Upgrade from 0.1.0
+        run: bash scripts/test-upgrade.sh
       - name: Logs
         if: failure()
         run: docker compose logs db

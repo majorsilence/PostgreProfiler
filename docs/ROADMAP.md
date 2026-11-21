@@ -346,6 +346,61 @@ noise (about 10 %). That is on the shortest possible statements, but it means th
 - *Risk:* write amplification of the archiver. Mitigation: batch per interval,
   unlogged option, measured with `pgbench`.
 
+**Phase C as built** (version 0.2.0, built in five steps):
+
+- **Aggregates** (`src/stats.rs`): four rotating generations of `stats_entries`
+  entries (488 bytes: calls, errors, sum/sumsq/min/max of execution time, planning
+  time, rows, buffer/WAL/CPU/IO counters, a 60-bucket latency histogram with two
+  buckets per octave, 12 wait counters), keyed by (database, role, query, plan) and
+  tagged with the interval. Lookup and creation are lock-free (open addressing,
+  state flag per entry), counters are updated under a per-entry spin flag, rotation
+  takes one LWLock exclusively and readers (the archiver, SQL functions) shared.
+  Unlike the plan, this is **not** a `ShmemInitHash`: a fixed table that is cleared
+  as a whole needs no deletion and no dynahash partition locks. Query text lives in
+  a separate cache of `stats_entries` slots (windows of 8, evict the least recently
+  used, seqlock readers); the archiver resolves text from it when it stores an
+  interval.
+- **Archiver** (`src/archiver.rs`): one static background worker (started after
+  recovery, so not on standbys) that connects to `pg_profiler.archive_database`,
+  copies each closed interval (after a 2 s grace period) with a single
+  `jsonb_to_recordset` insert, upserts query texts, touches plan rows, copies the
+  plan ring into `pg_profiler_hist_plans` / `_plan_samples`, flushes the interval in
+  progress at clean shutdown, and runs `pg_profiler_purge()` hourly. Deviation from
+  the plan: the archive is **one central database** chosen by a setting (decision 3
+  in section 7), not "the first database where the extension was created". A
+  database without the extension makes the worker log a reminder every ten minutes.
+- **History schema:** `pg_profiler_hist_stats` partitioned by day (UTC) with
+  partitions created by `pg_profiler_ensure_partition()`; retention by days, then
+  by size (oldest day first, never the last), stale query/plan/sample deletion and
+  a per-query plan cap. `pg_profiler_runtime_stats` merges history with the
+  intervals newer than the newest archived one, so a row is never counted twice.
+- **Wait sampler** (`src/sampler.rs`): static worker, no database connection;
+  every `wait_sample_ms` it increments one of 12 counters in the running slot of
+  each backend that is executing a statement; the backend takes them at the end of
+  its top-level statement. Waits are attributed to top-level statements only.
+- **Reports** in SQL over `pg_profiler_runtime_stats`: top consumers (metric
+  picker), overall consumption, high variation, query history (the tracked-query
+  report), regressed queries (Welch's t from sums and sums of squares, ratio
+  threshold, plan-change flag) and wait statistics. Percentiles come from the
+  histogram (about 20 % resolution), which Query Store lacks.
+- **Upgrades:** `sql/pg_profiler--0.1.0--0.2.0.sql` (generated from the difference of
+  the two install scripts, additions only) and `scripts/test-upgrade.sh`, which
+  upgrades a 0.1.0 database and compares every function, view, table and privilege
+  with a fresh 0.2.0 install. Run in CI against the runtime image.
+- **Tests:** pg_regress `stats`, `history` and `reports` (synthetic history with a
+  known regression, noise filter, plan change and permissions), unit tests for the
+  histogram and the wait classes, `scripts/e2e-archive.sh` (load, wait for the
+  archiver, read history, reports and waits back; 10 s intervals).
+- **Not done:** capture mode `custom` and automatic read-only mode when the
+  archive is full (the size cap purges instead); persisted statistics on standbys;
+  query text normalisation; rows lost between a crash and the last archived
+  interval; a statistics reset that also clears the archive.
+- **Measured:** an end-to-end run (4 pgbench clients, 10 s intervals, PG18) archived
+  every interval with no lost or dropped entries, and the wait report showed 97 %
+  lock waits on the `pgbench_branches` update. The overhead of aggregation (one
+  hash lookup and a spin flag per statement, plus the sampler) was not measured
+  separately; see the overhead note under phase B.
+
 ### Phase D: GUI  (XL, can start after phase A's API contract exists)
 1. **D1 (after A):** server skeleton, auth, Live Trace, Running Now, Events,
    Settings, Docker image and compose service, a demo stack with a workload
@@ -411,8 +466,8 @@ what we did about it:
 
 ### Suggested order
 `A → H → D1 (parallel with B) → C → D2 → E0 → E1/E2/E3 → G`, with F slotted in
-wherever OTLP is wanted. A, H and B are done; D1 (the GUI skeleton) and C (Query Store core)
-are next.
+wherever OTLP is wanted. A, H, B and C are done; D1 (the GUI skeleton) and D2 (Query Store
+screens) are next, then E0 (the plan forcing spike).
 
 ## 6. Cross-cutting concerns
 

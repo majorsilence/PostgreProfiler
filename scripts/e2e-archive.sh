@@ -3,6 +3,7 @@
 # (docker compose up --build -d db, started with PG_PROFILER_STATS_INTERVAL=10):
 # generate load, wait for the archiver, and read the history back.
 set -euo pipefail
+export MSYS_NO_PATHCONV=1   # Git Bash on Windows would rewrite container paths
 sql() { docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=1 -qAt "$@"; }
 fail() { echo "FAIL: $*" >&2; docker compose logs db | tail -30 >&2; exit 1; }
 
