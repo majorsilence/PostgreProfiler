@@ -411,8 +411,6 @@ fn rotate(h: &StatsHeader, n: u64) {
 #[derive(Copy, Clone)]
 pub struct Row {
     pub interval_no: u64,
-    #[allow(dead_code)] // read by the archiver
-    pub archived: bool,
     pub dbid: u32,
     pub userid: u32,
     pub queryid: i64,
@@ -426,7 +424,6 @@ pub enum Which {
     /// Everything that is in memory.
     All,
     /// Only closed intervals the archiver has not stored yet.
-    #[allow(dead_code)] // used by the archiver
     ClosedUnarchived,
     /// Everything not yet stored, including the current interval.
     Unarchived,
@@ -468,7 +465,6 @@ pub fn snapshot(which: Which) -> Vec<Row> {
                 spin_unlock(&(*e).lock);
                 out.push(Row {
                     interval_no: n,
-                    archived,
                     dbid: (*e).dbid,
                     userid: (*e).userid,
                     queryid: (*e).queryid,
@@ -482,7 +478,6 @@ pub fn snapshot(which: Which) -> Vec<Row> {
 }
 
 /// Record that the archiver has stored interval `n`.
-#[allow(dead_code)] // used by the archiver
 pub fn mark_archived(n: u64) {
     let Some(h) = header() else { return };
     let _guard = stats_lock().acquire(pg_sys::LWLockMode::LW_SHARED);

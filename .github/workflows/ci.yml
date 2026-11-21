@@ -51,6 +51,7 @@ jobs:
         pg: [17, 18, 19]
     env:
       PG_MAJOR: ${{ matrix.pg }}
+      PG_PROFILER_STATS_INTERVAL: 10
     steps:
       - uses: actions/checkout@v4
       - name: Build and start the db image
@@ -65,6 +66,8 @@ jobs:
           docker compose exec -T db psql -U postgres -c "SELECT 1;"
           docker compose exec -T db psql -U postgres -c "SELECT cmd_type, rows FROM pg_profiler_recent LIMIT 3;"
           docker compose exec -T db psql -U postgres -c "SELECT * FROM pg_profiler_info();"
+      - name: Statistics history end-to-end
+        run: bash scripts/e2e-archive.sh
       - name: Logs
         if: failure()
         run: docker compose logs db

@@ -67,6 +67,12 @@ pub static STATS_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(300);
 pub static STATS_ENTRIES: GucSetting<i32> = GucSetting::<i32>::new(5000);
 pub static STATS_TEXT_LEN: GucSetting<i32> = GucSetting::<i32>::new(1024);
 pub static ARCHIVE: GucSetting<bool> = GucSetting::<bool>::new(true);
+/// Unset means "postgres".
+pub static ARCHIVE_DATABASE: GucSetting<Option<std::ffi::CString>> =
+    GucSetting::<Option<std::ffi::CString>>::new(None);
+pub static RETENTION_DAYS: GucSetting<i32> = GucSetting::<i32>::new(30);
+pub static MAX_ARCHIVE_SIZE_MB: GucSetting<i32> = GucSetting::<i32>::new(1024);
+pub static MAX_PLANS_PER_QUERY: GucSetting<i32> = GucSetting::<i32>::new(20);
 
 pub fn register() {
     GucRegistry::define_bool_guc(
@@ -319,5 +325,42 @@ pub fn register() {
         GucContext::Sighup,
         GucFlags::default(),
     );
+    GucRegistry::define_string_guc(
+        c"pg_profiler.archive_database",
+        c"Database that stores the statistics history; needs CREATE EXTENSION pg_profiler.",
+        c"Defaults to postgres when empty.",
+        &ARCHIVE_DATABASE,
+        GucContext::Postmaster,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.retention_days",
+        c"Days of statistics history to keep (0 keeps everything).",
+        c"",
+        &RETENTION_DAYS,
+        0,
+        36_500,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.max_archive_size_mb",
+        c"Size cap of the statistics history; the oldest day is dropped when it is exceeded (0 = no cap).",
+        c"",
+        &MAX_ARCHIVE_SIZE_MB,
+        0,
+        i32::MAX,
+        GucContext::Sighup,
+        GucFlags::UNIT_MB,
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.max_plans_per_query",
+        c"Plans kept per query in the history; the least recently seen are removed (0 = no cap).",
+        c"",
+        &MAX_PLANS_PER_QUERY,
+        0,
+        10_000,
+        GucContext::Sighup,
+        GucFlags::default(),
+    );
 }
-

@@ -20,6 +20,7 @@ pg_bench = ["dep:pgrx-bench"]
 [dependencies]
 pgrx = "=0.20.0"
 libc = "0.2"
+serde_json = "1"
 
 [dependencies.pgrx-bench]
 version = "=0.20.0"

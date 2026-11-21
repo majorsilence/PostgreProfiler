@@ -1,5 +1,6 @@
 use pgrx::prelude::*;
 
+mod archiver;
 mod backend;
 mod events;
 mod gucs;
@@ -27,6 +28,7 @@ pub extern "C-unwind" fn _PG_init() {
     gucs::register();
     ring::install();
     hooks::install();
+    archiver::register();
 }
 
 #[cfg(any(test, feature = "pg_test"))]

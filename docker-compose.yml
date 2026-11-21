@@ -25,6 +25,8 @@ services:
       target: postgres
       args:
         PG_MAJOR: ${PG_MAJOR:-18}
+    # Short statistics intervals make the archive visible quickly (scripts/e2e-archive.sh).
+    command: ["postgres", "-c", "shared_preload_libraries=pg_profiler", "-c", "pg_profiler.stats_interval=${PG_PROFILER_STATS_INTERVAL:-300}"]
     environment:
       POSTGRES_PASSWORD: postgres   # local development only
     ports:

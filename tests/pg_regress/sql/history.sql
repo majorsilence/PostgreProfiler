@@ -1,0 +1,51 @@
+-- the history tables: daily partitions, retention, and the merged views
+SET timezone = 'UTC';
+SELECT pg_profiler_ensure_partition(timestamptz '2020-01-02 12:00:00+00') AS partition;
+SELECT pg_profiler_ensure_partition(timestamptz '2020-01-02 23:59:59+00') AS same_partition;
+SELECT pg_profiler_ensure_partition(timestamptz '2020-01-03 00:00:00+00') AS next_partition;
+
+-- one row per interval, query and plan
+INSERT INTO pg_profiler_hist_stats
+SELECT t, 1, 10, 4242, 7, 5, 0, 10, 30, 1, 5, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       array_fill(0, ARRAY[60]), array_fill(0, ARRAY[12])
+  FROM unnest(ARRAY[timestamptz '2020-01-02 12:00:00+00', timestamptz '2020-01-03 12:00:00+00']) t;
+SELECT interval_start, calls FROM pg_profiler_runtime_stats
+ WHERE queryid = 4242 ORDER BY interval_start;
+SELECT tableoid::regclass AS partition, count(*) FROM pg_profiler_hist_stats GROUP BY 1 ORDER BY 1;
+
+-- the same interval twice is a conflict, which the archiver turns into "do nothing"
+INSERT INTO pg_profiler_hist_stats
+SELECT timestamptz '2020-01-02 12:00:00+00', 1, 10, 4242, 7, 99, 0, 10, 30, 1, 5, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+       array_fill(0, ARRAY[60]), array_fill(0, ARRAY[12])
+ON CONFLICT DO NOTHING;
+SELECT calls FROM pg_profiler_hist_stats WHERE interval_start = timestamptz '2020-01-02 12:00:00+00';
+
+-- queries and plans, with a cap of two plans per query
+INSERT INTO pg_profiler_hist_queries VALUES
+  (1, 4242, 'SELECT history_marker', now() - interval '1 day', now()),
+  (1, 4243, 'SELECT stale_marker', now() - interval '100 days', now() - interval '99 days');
+INSERT INTO pg_profiler_hist_plans VALUES
+  (1, 4242, 1, now() - interval '3 hours', now() - interval '3 hours', 'plan one', 'text'),
+  (1, 4242, 2, now() - interval '2 hours', now() - interval '2 hours', 'plan two', 'text'),
+  (1, 4242, 3, now() - interval '1 hour', now() - interval '1 hour', 'plan three', 'text'),
+  (1, 4243, 9, now() - interval '100 days', now() - interval '99 days', 'old plan', 'text');
+INSERT INTO pg_profiler_hist_plan_samples VALUES
+  (now() - interval '100 days', 1, 4243, 9, 'slow', 1, 0, 0, 'old sample', 'text'),
+  (now(), 1, 4242, 3, 'slow', 1, 0, 0, 'recent sample', 'text');
+SELECT query FROM pg_profiler_queries WHERE queryid = 4242;
+
+-- retention: old partitions, stale queries and samples go; the plan cap keeps the newest plans
+SELECT * FROM pg_profiler_purge(30, 0, 2);
+SELECT queryid, plan_id FROM pg_profiler_hist_plans ORDER BY queryid, plan_id;
+SELECT queryid FROM pg_profiler_hist_queries ORDER BY queryid;
+SELECT plan FROM pg_profiler_hist_plan_samples ORDER BY ts;
+SELECT count(*) AS old_rows_left FROM pg_profiler_hist_stats WHERE interval_start < now() - interval '30 days';
+
+-- admin only
+CREATE ROLE regress_history_plain;
+SET ROLE regress_history_plain;
+SELECT * FROM pg_profiler_purge(30, 0, 2);
+SELECT pg_profiler_ensure_partition(now());
+SELECT count(*) FROM pg_profiler_hist_queries;
+RESET ROLE;
+DROP ROLE regress_history_plain;
