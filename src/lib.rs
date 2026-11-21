@@ -29,6 +29,7 @@ pub extern "C-unwind" fn _PG_init() {
     ring::install();
     hooks::install();
     archiver::register();
+    sampler::register();
 }
 
 #[cfg(any(test, feature = "pg_test"))]

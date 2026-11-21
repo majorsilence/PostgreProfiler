@@ -49,8 +49,12 @@ fn trim_statement(mut s: &[u8]) -> &[u8] {
 
 /// Add a finished statement to the interval statistics. Unlike the ring this
 /// ignores `min_duration_ms` and the capture rules: the totals stay complete.
+///
+/// Wait samples belong to the top-level statement, which is the one the
+/// sampler sees running.
 pub fn aggregate(rec: &crate::record::TraceRecord, text: &[u8]) {
-    crate::stats::record(rec, text, &[0; crate::stats::WAIT_CATS]);
+    let waits = if rec.nesting == 0 { crate::running::take_waits() } else { [0; crate::stats::WAIT_CATS] };
+    crate::stats::record(rec, text, &waits);
 }
 
 /// Push a statement record unless the capture rules reject it.

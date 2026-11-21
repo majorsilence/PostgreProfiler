@@ -7,7 +7,7 @@ use crate::gucs;
 use crate::ring;
 use pgrx::pg_sys;
 use std::ptr;
-use std::sync::atomic::{fence, Ordering};
+use std::sync::atomic::{fence, AtomicU32, Ordering};
 
 /// Fixed part of a slot. The statement text follows it.
 #[derive(Copy, Clone)]
@@ -32,8 +32,59 @@ fn text_cap() -> usize {
     gucs::RUNNING_QUERY_LEN.get() as usize
 }
 
-fn stride() -> usize {
+/// Bytes of wait counters at the end of each slot.
+const WAIT_BYTES: usize = crate::stats::WAIT_CATS * 4;
+
+fn text_end() -> usize {
     (SLOT_HDR + text_cap() + 7) & !7
+}
+
+fn stride() -> usize {
+    text_end() + WAIT_BYTES
+}
+
+/// The per-category wait-sample counters of a slot. The sampler adds to them,
+/// the owning backend zeroes them when a statement starts and collects them
+/// when it ends.
+unsafe fn waits_ptr(index: usize) -> *mut AtomicU32 {
+    unsafe { slot_ptr(index).add(text_end()) as *mut AtomicU32 }
+}
+
+pub fn slot_count() -> usize {
+    nslots()
+}
+
+/// Is a statement running in slot `index`?
+pub fn is_active(index: usize) -> bool {
+    if ring::running_region().is_null() || index >= nslots() {
+        return false;
+    }
+    unsafe { ptr::read_volatile(&raw const (*(slot_ptr(index) as *const Slot)).active) == 1 }
+}
+
+/// Count one wait sample of `category` for the statement in slot `index`.
+pub fn add_wait(index: usize, category: usize) {
+    if category < crate::stats::WAIT_CATS && index < nslots() && !ring::running_region().is_null() {
+        unsafe { (*waits_ptr(index).add(category)).fetch_add(1, Ordering::Relaxed) };
+    }
+}
+
+/// Zero this backend's wait counters (a top-level statement starts).
+fn reset_waits(index: usize) {
+    for c in 0..crate::stats::WAIT_CATS {
+        unsafe { (*waits_ptr(index).add(c)).store(0, Ordering::Relaxed) };
+    }
+}
+
+/// Take (and zero) this backend's wait counters (a top-level statement ended).
+pub fn take_waits() -> [u32; crate::stats::WAIT_CATS] {
+    let mut out = [0u32; crate::stats::WAIT_CATS];
+    if let Some(idx) = my_index() {
+        for (c, slot) in out.iter_mut().enumerate() {
+            *slot = unsafe { (*waits_ptr(idx).add(c)).swap(0, Ordering::Relaxed) };
+        }
+    }
+    out
 }
 
 fn nslots() -> usize {
@@ -67,6 +118,7 @@ fn my_index() -> Option<usize> {
 /// Publish the statement this backend just started running.
 pub fn begin(mut slot: Slot, text: &[u8]) {
     let Some(idx) = my_index() else { return };
+    reset_waits(idx);
     unsafe {
         let p = slot_ptr(idx);
         let sp = p as *mut Slot;

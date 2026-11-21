@@ -66,6 +66,7 @@ pub static STATS_AUTO_MIN_MS: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 pub static STATS_INTERVAL: GucSetting<i32> = GucSetting::<i32>::new(300);
 pub static STATS_ENTRIES: GucSetting<i32> = GucSetting::<i32>::new(5000);
 pub static STATS_TEXT_LEN: GucSetting<i32> = GucSetting::<i32>::new(1024);
+pub static WAIT_SAMPLE_MS: GucSetting<i32> = GucSetting::<i32>::new(10);
 pub static ARCHIVE: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// Unset means "postgres".
 pub static ARCHIVE_DATABASE: GucSetting<Option<std::ffi::CString>> =
@@ -362,5 +363,15 @@ pub fn register() {
         10_000,
         GucContext::Sighup,
         GucFlags::default(),
+    );
+    GucRegistry::define_int_guc(
+        c"pg_profiler.wait_sample_ms",
+        c"How often the wait sampler looks at what running statements wait for, in milliseconds.",
+        c"0 disables wait sampling. Needs pg_profiler.track_running. Statements shorter than the period show no waits.",
+        &WAIT_SAMPLE_MS,
+        0,
+        1000,
+        GucContext::Postmaster,
+        GucFlags::UNIT_MS,
     );
 }

@@ -7,6 +7,11 @@ sql() { docker compose exec -T db psql -U postgres -v ON_ERROR_STOP=1 -qAt "$@";
 fail() { echo "FAIL: $*" >&2; docker compose logs db | tail -30 >&2; exit 1; }
 
 sql -c "CREATE EXTENSION IF NOT EXISTS pg_profiler"
+# wait sampling: a one second sleep is counted in the timeout category (index 9, 1-based)
+sql -c "SELECT pg_sleep(1) /* e2e_wait */" >/dev/null
+w=$(sql -c "SELECT coalesce(sum(m.wait_samples[9]), 0) FROM pg_profiler_stats_memory() m JOIN pg_profiler_stats_texts() t USING (dbid, queryid) WHERE t.query LIKE '%e2e_wait%'")
+[ "$w" -ge 50 ] || fail "expected wait samples for a one second sleep, found $w"
+
 docker compose exec -T db bash -c 'pgbench -U postgres -i -q postgres >/dev/null 2>&1 && pgbench -U postgres -T 25 -c 4 -M prepared postgres >/dev/null 2>&1'
 sleep 15   # the last interval closes, then the archiver's grace period and poll
 
@@ -22,4 +27,4 @@ dup=$(sql -c "SELECT count(*) FROM (SELECT interval_start, dbid, userid, queryid
 [ "$dup" -eq 0 ] || fail "runtime_stats counts $dup rows twice"
 lost=$(sql -c "SELECT lost_intervals FROM pg_profiler_stats_info()")
 [ "$lost" -eq 0 ] || fail "$lost intervals were lost before they were archived"
-echo "archive end-to-end OK: $n intervals, $calls calls, $q pgbench queries, $p plans"
+echo "archive end-to-end OK: $w wait samples, $n intervals, $calls calls, $q pgbench queries, $p plans"
