@@ -7,6 +7,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod qs;
 mod stream;
 
 use std::sync::Arc;

@@ -64,6 +64,30 @@ grep -q 'e2e-rule' <<<"$(get "$jar_admin" /api/settings)" || fail "the new rule 
 [ "$(code -b "$jar_admin" -X DELETE -H "$H" "$base/api/rules/$id")" = "200" ] || fail "the rule could not be removed"
 [ "$(code -b "$jar_admin" -X POST -H "$H" -H 'Content-Type: application/json' -d '{}' "$base/api/reset")" = "200" ] || fail "the admin could not reset the buffers"
 
+# ---- Query Store screens: wait for the archiver to store an interval (30 s intervals in the demo)
+for i in $(seq 1 60); do
+  grep -q '"has_history":true' <<<"$(get "$jar_viewer" /api/qs/status)" && break
+  sleep 3
+done
+grep -q '"has_history":true' <<<"$(get "$jar_viewer" /api/qs/status)" || fail "no statistics interval was archived within three minutes"
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ); then=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+range="from=$then&to=$now"
+overall=$(get "$jar_viewer" "/api/qs/overall?$range&bucket=60")
+grep -q '"calls":' <<<"$overall" || fail "overall consumption is empty"
+top=$(get "$jar_viewer" "/api/qs/top?$range&metric=exec_time&limit=5")
+grep -q '"queryid":' <<<"$top" || fail "top consumers is empty"
+[ "$(code -b "$jar_viewer" "$base/api/qs/top?$range&metric=bogus")" = "400" ] || fail "an unknown metric was accepted"
+[ "$(code -b "$jar_viewer" "$base/api/qs/top?from=now();--&to=$now")" = "400" ] || fail "an invalid timestamp was accepted"
+for ep in "variation?$range" "waits?$range" "wait-series?$range&bucket=60" \
+          "regressed?recent_from=$then&recent_to=$now&baseline_from=$then&baseline_to=$now"; do
+  grep -q '^\[' <<<"$(get "$jar_viewer" "/api/qs/$ep")" || fail "/api/qs/$ep did not return a list"
+done
+dbid=$(grep -o '"dbid":"[0-9]*"' <<<"$top" | head -1 | grep -o '[0-9]*')
+qid=$(grep -o '"queryid":"\?-\?[0-9]*' <<<"$top" | head -1 | grep -o '\-\?[0-9]*$')
+[ -n "$dbid" ] && [ -n "$qid" ] || fail "could not read a query id from the top list"
+grep -q '"history":\[' <<<"$(get "$jar_viewer" "/api/qs/query?dbid=$dbid&queryid=$qid&$range")" || fail "no query history"
+grep -q '"plans":\[' <<<"$(get "$jar_viewer" "/api/qs/query/plans?dbid=$dbid&queryid=$qid")" || fail "no plan list"
+
 # logging out ends the session
 [ "$(code -b "$jar_viewer" -X POST -H "$H" "$base/api/logout")" = "200" ] || fail "logout failed"
 echo "UI end-to-end OK"

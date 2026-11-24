@@ -9,6 +9,8 @@
 # Demo credentials only.
 services:
   db:
+    # Short statistics intervals so that the Query Store screens fill within a minute.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_profiler", "-c", "pg_profiler.stats_interval=30"]
     volumes:
       - ./docker/demo-init.sql:/docker-entrypoint-initdb.d/10-demo.sql:ro
     healthcheck:

@@ -70,5 +70,21 @@ SQL
     wait
   done ) &
 
+# 7. a plan change: a lookup loses its index for a few minutes, then gets it back
+#    (Regressed queries and the plan comparison show it)
+(
+  q setup "CREATE TABLE IF NOT EXISTS orders_demo AS SELECT g AS id, (g % 5000) AS customer, now() AS created FROM generate_series(1, 300000) g"
+  q setup "CREATE INDEX IF NOT EXISTS orders_demo_customer ON orders_demo (customer)"
+  q setup "ANALYZE orders_demo"
+  ( while true; do q storefront "SELECT count(*) FROM orders_demo WHERE customer = $((RANDOM % 5000))"; sleep 0.2; done ) &
+  while true; do
+    sleep 180
+    q dba "DROP INDEX IF EXISTS orders_demo_customer"
+    sleep 180
+    q dba "CREATE INDEX IF NOT EXISTS orders_demo_customer ON orders_demo (customer)"
+    q dba "ANALYZE orders_demo"
+  done
+) &
+
 echo "workload: running"
 wait

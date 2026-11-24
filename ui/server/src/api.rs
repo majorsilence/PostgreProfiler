@@ -5,6 +5,7 @@ use crate::assets;
 use crate::auth::{cookie_token, Auth, Role, Session, COOKIE};
 use crate::db;
 use crate::error::ApiError;
+use crate::qs;
 use crate::stream::Hub;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, HeaderValue, Method, StatusCode};
@@ -44,6 +45,16 @@ pub fn router(state: Shared) -> Router {
         .route("/plan", get(plan))
         .route("/settings", get(settings))
         .route("/names", get(names))
+        .route("/qs/status", get(qs::status))
+        .route("/qs/overall", get(qs::overall))
+        .route("/qs/top", get(qs::top))
+        .route("/qs/variation", get(qs::variation))
+        .route("/qs/regressed", get(qs::regressed))
+        .route("/qs/waits", get(qs::waits))
+        .route("/qs/wait-series", get(qs::wait_series))
+        .route("/qs/query", get(qs::query_history))
+        .route("/qs/query/plans", get(qs::query_plans))
+        .route("/qs/plan", get(qs::plan_text))
         .route("/rules", post(rule_add))
         .route("/rules/{id}", delete(rule_remove))
         .route("/reset", post(reset))

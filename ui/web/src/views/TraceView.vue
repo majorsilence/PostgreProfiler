@@ -280,6 +280,9 @@ const hasFilters = computed(() => JSON.stringify(filters) !== JSON.stringify(emp
           <h3>Parameters</h3>
           <pre class="sql">{{ selected.params }}</pre>
         </template>
+        <p v-if="String(selected.queryid) !== '0'">
+          <RouterLink :to="`/store/query/${selected.dbid}/${selected.queryid}`">Open in Query Store (history, plans, trend) →</RouterLink>
+        </p>
         <h3>Plan</h3>
         <button v-if="!plan && planState !== 'loading'" @click="loadPlan(selected)" :disabled="String(selected.plan_id) === '0'">Load plan</button>
         <p v-if="planState === 'loading'" class="muted">Loading…</p>

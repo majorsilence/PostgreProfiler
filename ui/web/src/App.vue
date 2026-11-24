@@ -36,6 +36,12 @@ const feedLabel: Record<string, string> = {
       <RouterLink to="/trace">Live Trace</RouterLink>
       <RouterLink to="/running">Running Now</RouterLink>
       <RouterLink to="/events">Events</RouterLink>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <RouterLink to="/store/overview">Overview</RouterLink>
+      <RouterLink to="/store/regressed">Regressed</RouterLink>
+      <RouterLink to="/store/variation">Variation</RouterLink>
+      <RouterLink to="/store/waits">Waits</RouterLink>
+      <span class="nav-sep" aria-hidden="true"></span>
       <RouterLink to="/settings">Settings &amp; Health</RouterLink>
     </nav>
     <div class="spacer"></div>

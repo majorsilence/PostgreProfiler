@@ -11,6 +11,11 @@ CREATE ROLE profiler_ui_admin LOGIN PASSWORD 'profiler_ui_admin' IN ROLE profile
 -- pg_stat_activity, which only members of pg_read_all_stats see in full.
 GRANT pg_read_all_stats TO profiler_ui, profiler_ui_admin;
 
+-- Store plans with actual rows for a sample of statements that turn out slow,
+-- so the plan viewer has some.
+ALTER SYSTEM SET pg_profiler.plan_sample_rate = 0.1;
+ALTER SYSTEM SET pg_profiler.plan_outlier_ms = 20;
+
 -- Lock waits and deadlocks show up as events only with these.
 ALTER SYSTEM SET log_lock_waits = on;
 ALTER SYSTEM SET deadlock_timeout = '1s';

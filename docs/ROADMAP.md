@@ -405,7 +405,8 @@ noise (about 10 %). That is on the shortest possible statements, but it means th
 1. **D1 (after A):** server skeleton, auth, Live Trace, Running Now, Events,
    Settings, Docker image and compose service, a demo stack with a workload
    generator. **Built**, see "Phase D1 as built" below.
-2. **D2 (after C):** Query Store screens, plan viewer and plan diff.
+2. **D2 (after C):** Query Store screens, plan viewer and plan diff. **Built**, see
+   "Phase D2 as built" below.
 3. Saved templates and trace export (file); Playwright end-to-end tests against
    the compose stack; accessibility and keyboard basics.
 
@@ -453,6 +454,40 @@ noise (about 10 %). That is on the shortest possible statements, but it means th
   and the demo grant it. Starting the stream while many statements run delivers
   hundreds of rows per second to the browser; the UI caps its buffer, and per-viewer
   server-side filters would be the next step if that becomes a problem.
+
+**Phase D2 as built**:
+
+- **Server** (`ui/server/src/qs.rs`): `/api/qs/*` endpoints over the report functions
+  (`status`, `overall`, `top`, `variation`, `regressed`, `waits`, `wait-series`,
+  `query`, `query/plans`, `plan`). Time ranges arrive as ISO timestamps, are
+  validated against a character whitelist and cast to `timestamptz` in the database;
+  metrics are checked against the extension's list; ids are parsed as numbers;
+  limits and bucket sizes are clamped. Plans come from the history table first and
+  fall back to the plan ring; runs with actual rows come from the samples table plus
+  the ring.
+- **SPA:** one shared time range (presets or custom, remembered, preset ranges move
+  forward every 30 s), small SVG charts written for the app (line and stacked bars,
+  hover values, toggleable legend; no chart library), and the screens listed in the
+  README. The statistics logic is plain functions with tests: ranges and bucket
+  sizes, axis ticks, the plan parser, the plan diff.
+- **Plan viewer decision (decision 7):** **not pev2.** Its licence is the PostgreSQL
+  licence, but it pulls in about 1.4 MB, Bootstrap's global CSS (which would restyle
+  the whole app), a WTFPL-licensed layout package and CC-BY icons. The viewer here
+  parses EXPLAIN text and JSON itself: a tree with the node's share of the estimated
+  cost, estimate versus actual rows per loop, timings, and flags for misestimates (same
+  rule as the server: ten times off with at least 100 rows), spills (`Disk:` or more
+  than one hash batch), sequential scans of 10,000 or more rows and nodes that never
+  ran. It is deliberately smaller than pev2 (no flame graph or per-node I/O charts);
+  the plan text can be copied for an external viewer. Plans are stored as text unless
+  `pg_profiler.plan_format = json`; both work.
+- **Plan comparison:** a line diff of two plans, by default with costs, row counts and
+  timings removed so that only changes of shape show.
+- **Demo:** 30-second statistics intervals, a sampled-plan setting, and a workload job
+  that drops and recreates an index every three minutes, which produces a plan change
+  and a regression to look at.
+- **Not done:** "Queries with forced plans" (phase E), saved views, deadlock graph and
+  lock timeline, exporting charts, Playwright tests (the browser check was done by
+  hand against the demo stack), per-statement wait series over time.
 
 ### Phase E: hints and plan forcing  (XL, starts with a spike)
 - **E0 spike, go/no-go:** forcing a specific plan in Postgres has no native
@@ -511,8 +546,7 @@ what we did about it:
 
 ### Suggested order
 `A → H → D1 (parallel with B) → C → D2 → E0 → E1/E2/E3 → G`, with F slotted in
-wherever OTLP is wanted. A, H, B, C and D1 are done; D2 (Query Store screens and the plan viewer) is
-next, then E0 (the plan forcing spike).
+wherever OTLP is wanted. A, H, B, C, D1 and D2 are done; E0 (the plan forcing spike) is next.
 
 ## 6. Cross-cutting concerns
 

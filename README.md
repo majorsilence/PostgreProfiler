@@ -65,6 +65,26 @@ docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
 - **Settings & health:** version, buffer fill and overwrites, statistics state, all
   `pg_profiler.*` settings, and (admin) capture rules and clearing the buffers.
 
+**Query Store screens** (they read the statistics history, so point the UI at the
+archive database, or the screens show only what is still in memory):
+
+- **Overview:** the overall consumption over time (executions, execution time,
+  errors, rows, reads, WAL, CPU, ...) and the top resource consumers with a metric
+  picker (total or average time, executions, rows, reads, temp, WAL, CPU, I/O,
+  planning). Click a statement to open it.
+- **Regressed:** queries that got slower than in the period before, with the
+  statistical test and a "plan changed" flag.
+- **Variation:** queries with unpredictable run times, with percentiles.
+- **Waits:** what statements wait for, over time and per statement.
+- **A query:** its text, a trend with one line per plan, the stored plans (shown as a
+  tree with estimate-versus-actual bars and flags for misestimates, spills and large
+  sequential scans, or as text), a **comparison of two plans**, and the runs that
+  were stored with actual rows. Every screen shares one time range.
+
+The plan viewer is built into the app; it reads EXPLAIN text and JSON. A plan can
+be copied to paste into an external viewer such as explain.dalibo.com, but the UI
+never sends plans anywhere.
+
 **Configuration** is by environment variables: `PROFILER_DB_URL` (required, a member
 of `profiler_reader`; also `pg_read_all_stats` for the state, wait events and
 blockers of other users' sessions), `PROFILER_ADMIN_DB_URL` (optional, a member of
@@ -87,8 +107,9 @@ can sign in sees everything `profiler_reader` sees.
 **Building and testing** happen in Docker: `docker build ui/` runs the web app's
 unit tests (vitest) and the server's tests, and `scripts/e2e-ui.sh` checks login,
 permissions, the endpoints, the live stream and the admin actions against the demo
-stack. The Query Store screens (top consumers, regressed queries, wait statistics,
-plan viewer) are the next step ([docs/ROADMAP.md](docs/ROADMAP.md), phase D2).
+stack, and its `ui` job also waits for the first archived interval and reads the
+Query Store endpoints back. Next in the roadmap is plan forcing
+([docs/ROADMAP.md](docs/ROADMAP.md), phase E).
 
 ## Upgrading
 
